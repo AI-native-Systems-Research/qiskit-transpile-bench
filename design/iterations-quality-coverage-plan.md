@@ -111,7 +111,9 @@ Work of the current quality stage for one revision, from the measurements of sec
 
 The model of section 9 turns this into about 6 minutes of wall time per revision. A
 session that compiles both revisions (an A/A session, or the first session against a new
-baseline) then takes 12 to 16 minutes, which matches the reported 15. All estimates in
+baseline) then takes 12 to 14 minutes at a start-up cost of 0.5 to 4 seconds, and more
+with the slower compiles that the harness records (section 9.2). This matches the
+reported 15. All estimates in
 this plan are a share of the current stage, converted to minutes on a 15-minute stage.
 The share depends a little on the kind of session, so section 9 gives both kinds.
 
@@ -149,8 +151,9 @@ its `+sabre` suffix. The coverage cases also change role, panel and weight (sect
 | `square_heisenberg_n100` | G2 | `heavy_hex_d9_cz` | 1, 3 | 956, 353 | 0.084, 0.079 | 9.9% | 0.9 |
 | `qaoa_ba_n100_3reps` | G3 | `heavy_hex_d9_cz` | 1, 3 | 1,644, 1,523 | 0.044, 0.048 | 4.2% | 2.4 |
 
-They cover most of an open risk in section 12 of the implementation plan: levels 1 and
-3 of the scored circuits are unguarded today. `qft_n100` at level 3 is the first extra
+They cover most of an open risk in section 12 of the implementation plan
+(`design/transpilation-benchmark-impl-plan.md`): levels 1 and 3 of the scored circuits
+are unguarded today. `qft_n100` at level 3 is the first extra
 of section 6. They add no new input group.
 
 ### 5.2 Tier B: new input groups (26 cases, 8 groups)
@@ -213,7 +216,8 @@ Counts are coverage cases, 30 in total. The three primary cases are not included
 
 | Left out | Reason |
 | --- | --- |
-| Every medium input on Rochester, the 7×7 grid at levels 1 to 3, `qv_n14_d14_s10`, `qft_cp_n8` | Excluded by the rule of section 11.1. Most of them showed a changing layout in the probe |
+| The medium inputs on Rochester that leave qubits idle, the 7×7 grid, `qv_n14_d14_s10` and `qft_cp_n8`, each at levels 1 to 3 | Excluded by the rule of section 11.1. Most of them showed a changing layout in the probe. At level 0 they pass that rule, but each would add a new group (rule 6) |
+| `queko_bss_53` with SABRE methods | Passes the rule of section 11.1, because it fills Rochester. Left out under rule 6: G8 already gets `queko_bntf_54`, which also adds the grid class and one direction per coupling. Its default-method cases are exact guards (section 5.3) |
 | `qft_n100` at levels 0 and 1 | Outputs of 190,000 and 100,000 operations. They cost 5 and 3 minutes, most of it in the serial checks |
 | `su2_circular_n89` at levels 2 and 3 | 6 to 7 s and 34 to 40 s per compile |
 | `qv_n50_d50`, `qaoa_complete_n32`, `qft_full_n64` | 12, 7 and 5 minutes |
@@ -229,7 +233,7 @@ Measure the recommended set first (section 13), then use this list.
 | Extra | Cost (min) | What it adds |
 | --- | ---: | --- |
 | `qft_n100` at level 3 | 1.8 | Level 3 for the third loop circuit, no new group |
-| `su2_circular_n89` at level 2, 20 seeds | 1.0 | The heaviest confirm case of G7, as a per-case guard outside the panel. Its `sd` is 0.055, so with the noise-aware cap it trips at about 5% |
+| `su2_circular_n89` at level 2, 20 seeds | 1.0 | The heaviest confirm case of G7, as a per-case guard outside the panel. Its `sd` is 0.055, so three standard errors are about 5.2%. It trips at about 5% under today's rule for such a guard and under the noise-aware cap alike |
 | `qv_n14_d14` at levels 0 to 3 | 0.7 | A `Target` with error properties and one direction per coupling. A new group with 3.1% |
 | `bv_all_ones_n100` at level 3 | 0.8 | Completes the levels of G6 |
 | `square_heisenberg_n100`, `qaoa_ba_n100_3reps` at level 0 | 1.3 each | Routing alone on a trivial layout, large band |
@@ -296,13 +300,16 @@ Give the 30 cases role `scored` and one weight tree together with the three prim
 cases. The evaluator then needs no new panel, only the noise-aware cap. The role brings
 two costs of its own. Every scored case replays all 100 seeds, which raises the estimate
 from 9.2 to 13.0 minutes. The stage-coverage rule then applies to 33 cases instead of 3.
+With the same role as their confirm twins, the cases would also share stored baseline
+rows with them. Those rows carry confirm's C1-lite checks, which iterations does not run,
+so the sharing needs a decision of its own.
 
 | | Guarded panel (recommended) | Part of the objective |
 | --- | --- | --- |
 | Loop optimizes | The three circuits, without harming the rest | The broad average |
 | Chance to pass confirm's breadth rule | Depends on the gain generalizing | Higher, the loop rewards breadth |
 | Meaning of an iterations `PASS` | Unchanged | New claim, history not comparable |
-| Confirm as an independent check | Mostly kept | 43% of its weight is tuned on |
+| Confirm as an independent check | Mostly kept | 43% of its weight is in groups the loop tunes on |
 | Standard error of the objective | About 0.4% to 0.6%, as today | About 0.1% to 0.2% |
 
 Choose this if candidates keep failing confirm on breadth rather than on regressions.
@@ -340,11 +347,12 @@ plan, which carry 19.3% and 49.5% of the confirm score.
 
 **Two changes keep the drift visible:**
 
-1. List all 11 groups in the policies, next to the three scored groups. Both lists feed
-   report-only numbers.
+1. List all 11 groups in the policies, in a new key next to `iterations_groups`, which
+   holds the three scored groups. Both lists feed report-only numbers.
 2. The confirm run computes two leave-out scores, without the 3 scored groups and
-   without all 11 loop groups, and prints both. Today the first one is computed and
-   stored in `decision.json`, but `report.md` does not show it.
+   without all 11 loop groups, and prints both. Today the first one is computed for `D2`
+   and stored in `decision.json` as the summary `leave_iterations_out`, but `report.md`
+   does not show it.
 
 ## 9. Cost estimate
 
@@ -431,9 +439,10 @@ cost of 2 seconds or less.
 
 All measurements used the harness's own adapter, fixtures and metric code. They wrote
 their results to a scratch directory and changed no source, fixture or profile. The probe
-script and its summary are
-`design/probes/iterations_coverage_probe.py` and
-`design/probes/iterations_coverage_probe.json`.
+script and its summary are meant to be `design/probes/iterations_coverage_probe.py` and
+`design/probes/iterations_coverage_probe.json`. **Neither file is in the repository
+yet.** They must be added before this plan is reviewed, because nothing else records the
+numbers of sections 5, 9, 10 and 11.
 
 | Measurement | Size | Result |
 | --- | --- | --- |
@@ -480,11 +489,11 @@ input with the loop and is the fair comparison.
 
 Reading:
 
-- **The three-circuit score overstates the effect on the suite** by 2 to 3 points of
-  depth, and the gate-count loss by 1 to 2 points.
+- **The three-circuit score overstates the effect on the suite** by 1.9 to 2.6 points
+  of depth, and the gate-count loss by 0.8 to 2.2 points.
 - **The coverage panel is within one point of the confirm score**: 0.5 to 0.9 points for
-  `D2` and 0.1 to 0.4 for `N2`. Against the held-out groups the gaps are 0.4 to 1.0 and
-  0.3 to 1.0 points.
+  `D2` and 0.1 to 0.4 for `N2`. Against the held-out groups the gaps are 0.5 to 1.0 and
+  0.3 to 0.9 points.
 - **The coverage panel ranks the three candidates as confirm does.** The primary panel
   swaps `slack:10` and `product` on depth. Three candidates are weak evidence, so
   section 13 repeats the comparison.
@@ -579,8 +588,8 @@ High level, in order. None is started.
 | 1 | Generate the 50 cases from the existing catalog rows and append them after the first nine iteration cases | `tools/curate/curate.py` |
 | 2 | Compute the coverage weights with the confirm tree and freeze them in the manifest | `tools/curate/curate.py` |
 | 3 | Add the `coverage` panel guard, the noise-aware cap and the report-only summaries | `src/qtb/evaluator/__init__.py` |
-| 4 | Replay the first ten seeds of a coverage case | `routing_replay_seeds` in `src/qtb/coordinator/__init__.py` |
-| 5 | Add the list of loop groups and the cap rule to the policy and its schema. Compute the second leave-out score | `policy.json`, `src/qtb/config/schemas/policy.json`, evaluator |
+| 4 | Replay the first ten seeds of a coverage case. Today a guard in a panel other than `basis-cx` or `basis-ecr` replays none | `routing_replay_seeds` in `src/qtb/coordinator/__init__.py` |
+| 5 | Add the 11 loop groups, as a new key next to `iterations_groups`, and the cap rule to the policy and its schema. Compute the second leave-out score | `policy.json`, `src/qtb/config/schemas/policy.json`, evaluator |
 | 6 | Add the coverage section to the iterations report, and both leave-out scores to the confirm report | `src/qtb/reporter/__init__.py` |
 | 7 | Bump both profiles to version 7 | `curate.py` sets the version in two places |
 | 8 | Update the case counts, the rule tables and the budgets | `README.md` and, under `docs/`: `iterations-profile.md`, `confirm-profile.md`, `metrics.md`, `versioning.md`, `verifier.md`, `validation.md`, `output-format.md`, `workflow/quality.md` |
@@ -590,8 +599,9 @@ High level, in order. None is started.
 **Points that are easy to get wrong.**
 
 - **Do not extend the `ITERATIONS` list** in `curate.py` to the new groups. It also
-  drives the Clifford variants, the basis guards and the levels of the confirm timing
-  panel. The added cases need a list of their own.
+  drives the Clifford variants, the basis guards, the levels of the confirm timing panel
+  and the policy's `iterations_groups`, which feeds the `leave_iterations_out` score. The
+  added cases need a list of their own.
 - **Leave the Clifford variant out** of the four tier A cases (section 2).
 - **Give every coverage case a weight above zero.** `make_case` sets 0.0, and only scored
   cases get a weight afterwards. A zero weight makes the panel estimator raise an error.
