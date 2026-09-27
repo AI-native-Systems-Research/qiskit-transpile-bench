@@ -33,7 +33,7 @@ flowchart TD
 | compile | 16 | one host; the baseline and evolved builds run concurrently and share the slots | — |
 | quality | 16 | one host | compile complete |
 | correctness | 16 | one host | quality complete |
-| unit-tests (unless `--no-unit-tests`) | 16 | one host | quality complete; runs alongside correctness |
+| unit-tests (only with `--unit-tests`) | 16 | one host | quality complete; runs alongside correctness |
 | cost | 9 | 9 exclusive physical cores, one quiet host of the approved tier | correctness complete and unit-tests settled |
 | decide | — | inside the manager | every enabled stage settled |
 | clean | 16 | one host | decide wrote a current decision and the session is safe to clean |
@@ -135,7 +135,7 @@ uv run python lsf/submit.py \
   --cost-max-r1m 10
 ```
 
-Without the optional upstream tests, add `--no-unit-tests`. For detailed logs, add
+The optional upstream tests are off by default; add `--unit-tests` to run them. For detailed logs, add
 `--log-level DEBUG` (or set `LSF_LOG_LEVEL=DEBUG`). `uv run python lsf/submit.py --help`
 lists every option with its default.
 

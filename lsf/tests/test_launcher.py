@@ -86,7 +86,7 @@ def test_the_configuration_is_fixed_where_the_plan_fixes_it(paths):
     assert resources["cost"]["queue"] == "quiet" and resources["compile"]["queue"] == "normal"
     assert config["tier"] == {"model": None, "ncpus": 56}
     assert config["cost_selector"]["max_r1m"] == 10.0
-    assert config["max_cost_retries"] == 20 and config["unit_tests"] is True
+    assert config["max_cost_retries"] == 20 and config["unit_tests"] is False
     help_text = submit.parser().format_help()
     for group in (
         "session inputs",

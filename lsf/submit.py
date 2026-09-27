@@ -115,7 +115,10 @@ def parser():
     )
     execution = cli.add_argument_group("execution")
     execution.add_argument(
-        "--no-unit-tests", action="store_true", help="do not run the optional upstream tests"
+        "--unit-tests",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="run the optional upstream tests",
     )
     resources = cli.add_argument_group(
         "cluster resources",
@@ -258,7 +261,7 @@ def resolve(args, environ=None):
         "baseline": baseline,
         "evolved": evolved,
         "profile": args.profile,
-        "unit_tests": not args.no_unit_tests,
+        "unit_tests": args.unit_tests,
         "python": sys.executable,
         "project": str(Path(__file__).resolve().parents[1]),
         "log_level": level,
@@ -405,7 +408,7 @@ def _recorded_options(launch):
         "evolved": launch["evolved"],
         "store": launch["store"],
         "profile": launch["profile"],
-        "no_unit_tests": not launch["unit_tests"],
+        "unit_tests": launch["unit_tests"],
         "cost_model": selector["model"],
         "cost_ncpus": selector["ncpus"],
         "cost_max_r1m": selector["max_r1m"],

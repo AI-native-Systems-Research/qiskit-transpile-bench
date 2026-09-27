@@ -94,7 +94,7 @@ def argv_of(backend, kind):
 
 def test_the_whole_pipeline_runs_with_fixed_allocations(world, tmp_path):
     backend = FakeScheduler()
-    session, lsf_dir = launch(world, tmp_path, backend, "--queue", "normal")
+    session, lsf_dir = launch(world, tmp_path, backend, "--queue", "normal", "--unit-tests")
     assert manager(lsf_dir, backend).run() == 0
     assert stages_of(backend) == [
         "manager",
@@ -131,9 +131,9 @@ def test_the_whole_pipeline_runs_with_fixed_allocations(world, tmp_path):
     assert len(list((logs / "jobs").glob("job-*.log"))) == 6
 
 
-def test_without_unit_tests_the_stage_is_not_submitted(world, tmp_path):
+def test_by_default_unit_tests_are_not_submitted(world, tmp_path):
     backend = FakeScheduler()
-    session, lsf_dir = launch(world, tmp_path, backend, "--no-unit-tests")
+    session, lsf_dir = launch(world, tmp_path, backend)
     assert manager(lsf_dir, backend).run() == 0
     assert "unit-tests" not in stages_of(backend)
 
@@ -141,7 +141,7 @@ def test_without_unit_tests_the_stage_is_not_submitted(world, tmp_path):
 def test_gate_closed_stages_still_run_as_jobs_and_cleanup_follows_any_verdict(world, tmp_path):
     world.knobs.ratio = 1.0
     backend = FakeScheduler()
-    session, lsf_dir = launch(world, tmp_path, backend)
+    session, lsf_dir = launch(world, tmp_path, backend, "--unit-tests")
     assert manager(lsf_dir, backend).run() == 10
     assert stages_of(backend)[1:] == [
         "compile",
@@ -548,7 +548,7 @@ def test_a_second_signal_does_not_abort_the_cancellation(world, tmp_path):
         return cancel(job_id)
 
     backend.cancel = cancel_then_sigterm
-    session, lsf_dir = launch(world, tmp_path, backend)
+    session, lsf_dir = launch(world, tmp_path, backend, "--unit-tests")
     assert manager(lsf_dir, backend).run() == 128 + signal.SIGINT
     ledger = Ledger.load(lsf_dir / "ledger.json")
     for stage in ("correctness", "unit-tests"):
