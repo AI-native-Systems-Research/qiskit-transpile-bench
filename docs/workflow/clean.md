@@ -28,14 +28,15 @@ before `decide`, and when a stage changed after the last `decide`, for example w
 `unit-tests` was started later. It ignores the verdict. The automatic cleanup after `decide`
 is also skipped while a stage the verdict requires has not started.
 
-- **Deletes:** the evolved build, the source snapshots, the verifier and its cache, worker
-  scratch directories, `oracle-jobs/`, the copied upstream test trees and their
+- **Deletes:** the evolved build, the source snapshots, the verifier and its cache, `jobs/`
+  (every worker's `job.json`, `worker.log` and output circuits, including failing ones),
+  `oracle-jobs/`, the copied upstream test trees and their
   session-local `CARGO_HOME` crates, and verified quality and C6 prefix outputs larger than
-  the policy's `output_retention_bytes`. Failing or unverified outputs are kept.
+  the policy's `output_retention_bytes` outside `jobs/`.
 - **Keeps:** `run.json`, the archived profile, `harness-wheel/`, `stages/`, `evidence.json`,
   `decision.json`, `report.md`, the logs, `observations.jsonl`, `correctness.jsonl`,
-  `clifford.jsonl`, `cost/` (with the monitoring evidence and diagnostics), `changed-tests.json`,
-  every `job.json` and the snapshot manifests. The LSF records in `<session>.lsf/` are
+  `clifford.jsonl`, `cost/` (with the monitoring evidence and diagnostics), `changed-tests.json`
+  and the snapshot manifests. The LSF records in `<session>.lsf/` are
   outside the session and never cleaned.
 
 `clean` records every planned deletion in `clean.json` before deleting anything, and a

@@ -1,13 +1,14 @@
 """``clean``: delete a finished session's bulk and keep its results. It never touches the store.
 
-Deleted: the evolved build, the source snapshots, the verifier environment and cache, worker
-``scratch`` directories, ``oracle-jobs/``, the copied upstream test trees and the unit-test
+Deleted: the evolved build, the source snapshots, the verifier environment and cache,
+``jobs/`` (every worker's job, log and output circuits), ``oracle-jobs/``, the copied upstream
+test trees and the unit-test
 stage's session-local ``CARGO_HOME`` directories, and verified
 quality outputs and C6 prefixes larger than the policy's ``output_retention_bytes``.
 
 Kept: ``run.json``, the profile, ``harness-wheel/``, ``stages/``, the verdict files and logs,
 ``observations.jsonl``, ``correctness.jsonl``, ``clifford.jsonl``, ``cost/``,
-``changed-tests.json``, every ``job.json`` and the snapshot manifests. ``decide`` still works
+``changed-tests.json`` and the snapshot manifests. ``decide`` still works
 afterwards; every other stage exits 41.
 
 Every planned deletion is recorded in ``clean.json`` (a file's SHA-256, or a directory's
@@ -64,9 +65,8 @@ def planned_deletions(root):
     """Everything ``clean`` deletes, with provenance recorded before deletion."""
     root = Path(root)
     directories = [root / "builds" / "evolved-build", root / "verifier", root / "verifier-cache"]
-    directories += [root / "oracle-jobs"]
+    directories += [root / "jobs", root / "oracle-jobs"]
     directories += sorted(p for p in (root / "builds").glob("*") if p.is_dir())
-    directories += sorted(root.glob("jobs/**/scratch"))
     for upstream in sorted(p for p in root.glob("upstream-*") if p.is_dir()):
         # The copied test tree, and the crates of a session-local CARGO_HOME.
         directories += [upstream / "test", upstream / "cargo"]

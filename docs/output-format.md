@@ -30,7 +30,7 @@ Cleaned /…/sessions/idea1: freed 1.42 GiB in 38 items.
 | Which stages ran, where and for how long | the "Stages" table at the top of `report.md`, or `stages/<stage>/state.json` |
 | Why a stage failed or was skipped | `stages/<stage>/state.json` → `reason`, then `stages/<stage>/progress.log` |
 | Why a build failed | `builds/evolved-build/build.log`, or `STORE/builds/<key>/build.log` for the baseline |
-| Why one compile failed | `jobs/<id>/worker.log` and `jobs/<id>/out/results.jsonl` |
+| Why one compile failed | `jobs/<id>/worker.log` and `jobs/<id>/out/results.jsonl` (until `clean` deletes `jobs/`) |
 
 ## Exit codes
 

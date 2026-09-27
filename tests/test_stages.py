@@ -440,7 +440,7 @@ def test_clean_needs_a_current_decide_and_is_final(world):
     code, first = verdict(root)
     assert clean(root, progress=QUIET) == 0
     assert not evolved.exists() and not (root / "verifier").exists()
-    assert not (root / "jobs/j1/scratch").exists() and (root / "jobs/j1/job.json").exists()
+    assert not (root / "jobs").exists()
     assert not (root / "upstream-baseline/cargo").exists()
     record_ = read_json(root / "clean.json")
     assert record_["status"] == "complete"
