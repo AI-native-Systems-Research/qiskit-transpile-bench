@@ -1,12 +1,18 @@
 """Atomic session state, append-only observations, locks and cache helpers."""
 
+import errno
 import fcntl
 import json
 import os
 import shutil
+import socket
 import tempfile
+import threading
+import time
+import uuid
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 
 from qtb.canonical import canonical_bytes, digest, file_hash, read_json, write_json
@@ -44,7 +50,11 @@ def runner_lock():
 
 @contextmanager
 def locked(path, shared=False, wait=True):
-    """``flock`` on ``path``; with ``wait=False`` a held lock raises ``LockBusy``."""
+    """``flock`` on ``path``; with ``wait=False`` a held lock raises ``LockBusy``.
+
+    On the cluster's GPFS ``flock`` excludes only processes on the same host: a lock that
+    jobs on different hosts contend for needs ``host_lock``.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+") as stream:
@@ -57,6 +67,287 @@ def locked(path, shared=False, wait=True):
             yield
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+# ``host_lock`` timing. A holder touches its lock file every heartbeat; a lock whose file has
+# not been touched for ``LOCK_STALE_S`` belongs to a dead or frozen holder. This compares the
+# file's mtime with this host's clock, so it assumes cluster clocks agree to within minutes.
+LOCK_HEARTBEAT_S = 30
+LOCK_STALE_S = 600
+# A breaker normally lasts only a few syscalls. Give a blocked filesystem operation the
+# same lease as the main lock before another process can take over its breaker.
+LOCK_BREAK_S = LOCK_STALE_S
+LOCK_POLL_S = 2
+
+
+def _lock_state(path):
+    """``((device, inode), owner, mtime)`` of a lock, or ``None`` when absent.
+
+    ``owner`` is ``None`` while its holder is still writing it (or for a legacy empty file).
+    """
+    try:
+        with open(path, "rb") as stream:
+            data = stream.read()
+            stat = os.fstat(stream.fileno())
+    except FileNotFoundError:
+        return None
+    try:
+        owner = json.loads(data)
+    except ValueError:
+        owner = None
+    return (stat.st_dev, stat.st_ino), owner if isinstance(owner, dict) else None, stat.st_mtime
+
+
+def _lock_stale(state, timeout=None):
+    _, owner, mtime = state
+    if timeout is None:
+        timeout = LOCK_STALE_S
+    if time.time() - mtime > timeout:
+        return True
+    pid = owner.get("pid") if owner else None
+    if (owner and owner.get("host") == socket.gethostname()
+            and type(pid) is int and pid > 0):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+    return False
+
+
+def describe_lock_owner(owner):
+    if not owner:
+        return "an unknown holder"
+    return f"{owner.get('host')} pid {owner.get('pid')} since {owner.get('acquired_at')}"
+
+
+def _write_lock_owner(fd, owner):
+    data = memoryview(json.dumps(owner, sort_keys=True).encode())
+    while data:
+        written = os.write(fd, data)
+        if not written:
+            raise OSError("Could not write lock owner")
+        data = data[written:]
+    os.fsync(fd)
+
+
+def _reap_stale_breaker(breaker):
+    """Remove only an old breaker's unique marker, then its empty directory."""
+    try:
+        markers = list(breaker.iterdir())
+    except FileNotFoundError:
+        return
+    except NotADirectoryError:
+        # A breaker made by an older version was an exclusive file.
+        state = _lock_state(breaker)
+        if state is not None and _lock_stale(state, LOCK_BREAK_S):
+            try:
+                breaker.unlink()
+            except (FileNotFoundError, IsADirectoryError):
+                pass
+        return
+    if len(markers) == 1:
+        state = _lock_state(markers[0])
+        if state is None or not _lock_stale(state, LOCK_BREAK_S):
+            return
+        # A new breaker uses a different marker name. A delayed reaper cannot remove it.
+        markers[0].unlink(missing_ok=True)
+    elif markers:
+        return
+    try:
+        breaker.rmdir()
+    except OSError as exc:
+        if exc.errno not in {errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST}:
+            raise
+
+
+def _claim_breaker(path):
+    """Claim a prepopulated directory used by stale takeover and holder release.
+
+    Renaming the nonempty private directory into place avoids an empty-breaker window.
+    A stale reaper removes only its observed marker; a new breaker has a different name.
+    """
+    breaker = path.with_name(path.name + ".break")
+    token = uuid.uuid4().hex
+    private = path.with_name(f".{path.name}.break-{token}")
+    private.mkdir()
+    try:
+        fd = os.open(private / token, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            _write_lock_owner(fd, {"host": socket.gethostname(), "pid": os.getpid(),
+                                   "acquired_at": datetime.now(UTC).isoformat(),
+                                   "token": token})
+        finally:
+            os.close(fd)
+        try:
+            os.rename(private, breaker)
+        except OSError as exc:
+            if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR}:
+                raise
+            _reap_stale_breaker(breaker)
+            return None
+        marker = breaker / token
+        try:
+            os.utime(marker, None)
+        except FileNotFoundError:
+            return None  # its lease expired while the claimant was paused
+        return marker
+    finally:
+        if private.exists():
+            shutil.rmtree(private)
+
+
+def _release_breaker(marker):
+    marker.unlink(missing_ok=True)
+    try:
+        marker.parent.rmdir()
+    except OSError as exc:
+        if exc.errno not in {errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST}:
+            raise
+
+
+def _break_stale_lock(path, seen):
+    """Remove the observed stale lock while holding the breaker sidecar."""
+    marker = _claim_breaker(path)
+    if marker is None:
+        return False
+    try:
+        current = _lock_state(path)
+        if current is not None and current[:2] == seen[:2] and _lock_stale(current):
+            path.unlink()
+    finally:
+        _release_breaker(marker)
+    return True
+
+
+class HostLockHandle:
+    def __init__(self, path, owner, fd):
+        self.path, self.owner, self.fd = path, owner, fd
+        stat = os.fstat(fd)
+        self.identity = (stat.st_dev, stat.st_ino)
+        self.lost = threading.Event()
+
+    def held(self):
+        state = _lock_state(self.path)
+        return (state is not None and state[0] == self.identity
+                and (state[1] or {}).get("token") == self.owner["token"])
+
+    def verify(self):
+        """Raise unless this process still holds the lock (never taken over as stale)."""
+        if self.lost.is_set() or not self.held():
+            self.lost.set()
+            raise HarnessError(f"Lost the lock {self.path}: it was taken over as stale")
+
+    @contextmanager
+    def commit(self):
+        """Keep stale takeover from racing a short publication of shared state."""
+        while True:
+            self.verify()
+            marker = _claim_breaker(self.path)
+            if marker is not None:
+                break
+            time.sleep(LOCK_POLL_S)
+        try:
+            self.verify()
+            yield
+            self.verify()
+        finally:
+            _release_breaker(marker)
+
+
+@contextmanager
+def host_lock(path, wait=True, on_wait=None):
+    """An exclusive lock that holds across hosts on a shared filesystem, unlike ``flock``.
+
+    The lock is the file ``path``, created with ``O_CREAT | O_EXCL`` and holding the owner's
+    host, pid, start time and a unique token. A background thread touches it every
+    ``LOCK_HEARTBEAT_S``. A waiter takes over a stale lock: one untouched for
+    ``LOCK_STALE_S``, or one on this host whose pid is dead. ``on_wait(owner)`` is called
+    once when the lock is busy; with ``wait=False`` a busy lock raises ``LockBusy``. The
+    handle's ``commit()`` guards a short publication against concurrent stale takeover;
+    ownership is also checked on entry and normal exit.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    poll, waited = 0.05, False
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            state = _lock_state(path)
+            if state is None:
+                continue
+            if _lock_stale(state) and _break_stale_lock(path, state):
+                continue
+            if not wait:
+                raise LockBusy(f"Lock {path} is held by {describe_lock_owner(state[1])}") from None
+            if not waited and on_wait is not None:
+                on_wait(state[1])
+            waited = True
+            time.sleep(poll)
+            poll = min(poll * 2, LOCK_POLL_S)
+            continue
+        owner = {
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "acquired_at": datetime.now(UTC).isoformat(),
+            "token": uuid.uuid4().hex,
+        }
+        try:
+            _write_lock_owner(fd, owner)
+        except BaseException:
+            try:
+                stat = os.fstat(fd)
+                current = _lock_state(path)
+                if current is not None and current[0] == (stat.st_dev, stat.st_ino):
+                    path.unlink()
+            finally:
+                os.close(fd)
+            raise
+        break
+
+    handle = HostLockHandle(path, owner, fd)
+    stop = threading.Event()
+
+    def heartbeat():
+        while not stop.wait(LOCK_HEARTBEAT_S):
+            try:
+                if not handle.held():
+                    handle.lost.set()
+                    return
+                # Touch the acquired inode, never a successor at the same pathname.
+                os.utime(fd, None)
+            except OSError:
+                handle.lost.set()
+                return
+
+    beat = threading.Thread(target=heartbeat, name=f"lock-heartbeat:{path.name}", daemon=True)
+    try:
+        beat.start()
+        handle.verify()
+        yield handle
+        handle.verify()
+    finally:
+        stop.set()
+        if beat.is_alive():
+            beat.join()
+        try:
+            # The breaker serializes release with stale takeover. A resumed old holder
+            # must not unlink a new holder's lock after its own lease was taken over.
+            while handle.held():
+                marker = _claim_breaker(path)
+                if marker is None:
+                    time.sleep(LOCK_POLL_S)
+                    continue
+                try:
+                    if handle.held():
+                        path.unlink()
+                finally:
+                    _release_breaker(marker)
+                break
+        finally:
+            os.close(fd)
 
 
 def append_record(path, row):

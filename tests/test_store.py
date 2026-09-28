@@ -1,5 +1,9 @@
 """The baseline store: builds, published results and what may never be written to it."""
 
+import json
+import os
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -8,9 +12,9 @@ from pathlib import Path
 import pytest
 
 from qtb.canonical import digest, file_hash, read_json, write_json
-from qtb.coordinator import Comparison
+from qtb.coordinator import Comparison, storage
 from qtb.coordinator.quality import InlineExecutor
-from qtb.coordinator.storage import quality_entry_valid
+from qtb.coordinator.storage import LockBusy, host_lock, quality_entry_valid
 from qtb.coordinator.store import Store, build_key, resolve_store
 from qtb.errors import HarnessError, Usage
 
@@ -104,6 +108,204 @@ def test_an_interrupted_build_is_repaired_under_its_lock(tmp_path, monkeypatch):
     build = _comparison(tmp_path, store).baseline_build({"tree_hash": "tree"}, identity, "w", "x")
     assert calls == [partial] and not build["reused"]
     assert not (partial / "leftover").exists() and (partial / "READY").exists()
+
+
+def _foreign_lock(path, age=0.0, host="another-host", pid=1):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"host": host, "pid": pid, "token": "theirs"}))
+    stamp = time.time() - age
+    os.utime(path, (stamp, stamp))
+
+
+def test_a_host_lock_records_its_owner_and_excludes_others(tmp_path):
+    path = tmp_path / "k.lock"
+    with host_lock(path):
+        owner = json.loads(path.read_text())
+        assert owner["host"] == socket.gethostname() and owner["pid"] == os.getpid()
+        assert owner["acquired_at"] and owner["token"]
+        with pytest.raises(LockBusy, match=socket.gethostname()):
+            with host_lock(path, wait=False):
+                pass
+    assert not path.exists()
+    with host_lock(path, wait=False):
+        pass
+
+
+def test_a_fresh_lock_from_another_host_is_respected(tmp_path):
+    path = tmp_path / "k.lock"
+    _foreign_lock(path, age=storage.LOCK_STALE_S / 2)
+    with pytest.raises(LockBusy, match="another-host"):
+        with host_lock(path, wait=False):
+            pass
+    assert json.loads(path.read_text())["token"] == "theirs"
+
+
+def test_a_lock_without_a_heartbeat_is_taken_over(tmp_path):
+    path = tmp_path / "k.lock"
+    _foreign_lock(path, age=storage.LOCK_STALE_S + 1)
+    with host_lock(path, wait=False):
+        assert json.loads(path.read_text())["pid"] == os.getpid()
+
+
+def test_a_commit_guard_blocks_stale_takeover(tmp_path):
+    path = tmp_path / "k.lock"
+    with host_lock(path) as lock:
+        with lock.commit():
+            stamp = time.time() - storage.LOCK_STALE_S - 1
+            os.utime(path, (stamp, stamp))
+            with pytest.raises(LockBusy):
+                with host_lock(path, wait=False):
+                    pass
+            lock.verify()
+
+
+def test_a_lock_of_a_dead_process_on_this_host_is_taken_over(tmp_path):
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    path = tmp_path / "k.lock"
+    _foreign_lock(path, host=socket.gethostname(), pid=dead.pid)
+    with host_lock(path, wait=False):
+        assert json.loads(path.read_text())["pid"] == os.getpid()
+
+
+def test_the_heartbeat_keeps_a_long_hold_fresh(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "LOCK_HEARTBEAT_S", 0.05)
+    monkeypatch.setattr(storage, "LOCK_STALE_S", 0.5)
+    path = tmp_path / "k.lock"
+    with host_lock(path):
+        for _ in range(4):
+            time.sleep(0.3)
+            with pytest.raises(LockBusy):
+                with host_lock(path, wait=False):
+                    pass
+
+
+def test_a_holder_notices_its_lock_was_taken_over(tmp_path):
+    path = tmp_path / "k.lock"
+    with pytest.raises(HarnessError, match="Lost the lock"):
+        with host_lock(path) as lock:
+            path.unlink()
+            _foreign_lock(path)
+            lock.verify()
+    assert json.loads(path.read_text())["token"] == "theirs"
+
+
+def test_releasing_an_expired_holder_does_not_remove_its_successor(tmp_path, monkeypatch):
+    path = tmp_path / "k.lock"
+    expired, checked, resume = threading.Event(), threading.Event(), threading.Event()
+    original_held = storage.HostLockHandle.held
+
+    def paused_held(handle):
+        held = original_held(handle)
+        if (threading.current_thread().name == "expired-holder" and expired.is_set()
+                and not checked.is_set()):
+            checked.set()
+            resume.wait(timeout=5)
+        return held
+
+    monkeypatch.setattr(storage.HostLockHandle, "held", paused_held)
+
+    def old_holder():
+        try:
+            with host_lock(path):
+                stamp = time.time() - storage.LOCK_STALE_S - 1
+                os.utime(path, (stamp, stamp))
+                expired.set()
+                raise RuntimeError("leave without verifying")
+        except RuntimeError:
+            pass
+
+    old = threading.Thread(target=old_holder, name="expired-holder")
+    old.start()
+    assert checked.wait(timeout=5)
+    try:
+        with host_lock(path, wait=False):
+            successor = json.loads(path.read_text())["token"]
+            resume.set()
+            old.join(timeout=5)
+            assert not old.is_alive()
+            assert json.loads(path.read_text())["token"] == successor
+    finally:
+        resume.set()
+        old.join(timeout=5)
+
+
+def test_reaping_an_old_breaker_does_not_remove_a_new_one(tmp_path, monkeypatch):
+    path = tmp_path / "k.lock"
+    breaker = path.with_name(path.name + ".break")
+    breaker.mkdir()
+    _foreign_lock(breaker / "old", age=storage.LOCK_BREAK_S + 1)
+    marker_removed, resume = threading.Event(), threading.Event()
+    original_rmdir = Path.rmdir
+
+    def paused_rmdir(directory):
+        if directory == breaker and threading.current_thread().name == "breaker-reaper":
+            marker_removed.set()
+            resume.wait(timeout=5)
+        return original_rmdir(directory)
+
+    monkeypatch.setattr(Path, "rmdir", paused_rmdir)
+    results = []
+    reaper = threading.Thread(target=lambda: results.append(storage._claim_breaker(path)),
+                              name="breaker-reaper")
+    reaper.start()
+    assert marker_removed.wait(timeout=5)
+    try:
+        fresh = storage._claim_breaker(path)
+        assert fresh is not None and fresh.exists()
+        resume.set()
+        reaper.join(timeout=5)
+        assert not reaper.is_alive() and results == [None]
+        assert fresh.exists()
+        storage._release_breaker(fresh)
+    finally:
+        resume.set()
+        reaper.join(timeout=5)
+
+
+def test_an_abandoned_breaker_file_can_be_recovered(tmp_path):
+    path = tmp_path / "k.lock"
+    breaker = path.with_name(path.name + ".break")
+    _foreign_lock(breaker, age=storage.LOCK_BREAK_S + 1)
+    assert storage._claim_breaker(path) is None
+    marker = storage._claim_breaker(path)
+    assert marker is not None and marker.exists()
+    storage._release_breaker(marker)
+
+
+def test_failed_owner_write_does_not_leave_a_lock(tmp_path, monkeypatch):
+    path = tmp_path / "k.lock"
+
+    def fail_write(fd, owner):
+        raise OSError("write failed")
+
+    monkeypatch.setattr(storage, "_write_lock_owner", fail_write)
+    with pytest.raises(OSError, match="write failed"):
+        with host_lock(path):
+            pass
+    assert not path.exists()
+
+
+def test_waiters_racing_for_a_stale_lock_never_overlap(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "LOCK_POLL_S", 0.05)
+    path = tmp_path / "k.lock"
+    _foreign_lock(path, age=storage.LOCK_STALE_S + 1)
+    inside, overlaps, waits = [], [], []
+
+    def contender():
+        with host_lock(path, on_wait=waits.append):
+            inside.append(1)
+            overlaps.append(len(inside))
+            time.sleep(0.02)
+            inside.pop()
+
+    threads = [threading.Thread(target=contender) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(overlaps) == 8 and max(overlaps) == 1
+    assert waits and not path.exists()
 
 
 def test_a_stored_build_must_point_only_inside_its_entry(tmp_path):

@@ -52,6 +52,8 @@ from qtb.coordinator.quality import structural_result as structural_result
 from qtb.coordinator.runlog import RunLog, depth, duration, step
 from qtb.coordinator.storage import (
     cached_quality_observation,
+    describe_lock_owner,
+    host_lock,
     invalidate_quality_entry,
     locked,
     quality_cache_key,
@@ -489,7 +491,12 @@ class Comparison:
         reused = True
         build = self.store.ready_build(key)
         if build is None:
-            with locked(self.store.build_lock(key)):
+            def waiting(owner):
+                self.progress(
+                    f"Waiting for baseline build {key[:12]}, held by {describe_lock_owner(owner)}."
+                )
+
+            with host_lock(self.store.build_lock(key), on_wait=waiting) as lock:
                 build = self.store.ready_build(key)
                 if build is None:
                     reused = False
@@ -514,7 +521,10 @@ class Comparison:
                             progress=self.progress,
                             jobs=jobs,
                         )
-                    atomic_bytes(entry / "READY", (datetime.now(UTC).isoformat() + "\n").encode())
+                    with lock.commit():
+                        atomic_bytes(
+                            entry / "READY", (datetime.now(UTC).isoformat() + "\n").encode()
+                        )
         if reused:
             self.progress(f"Reusing baseline build {key} from the store.")
         verify_build(build)

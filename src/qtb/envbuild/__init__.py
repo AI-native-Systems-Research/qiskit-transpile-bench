@@ -370,14 +370,15 @@ def build_into(
         raise HarnessError("Build did not produce exactly one Qiskit wheel")
     if cache and not cache_hit:
         from qtb.canonical import atomic_bytes
-        from qtb.coordinator.storage import locked
+        from qtb.coordinator.storage import host_lock
 
-        with locked(cache / "cache.lock"):
-            atomic_bytes(cache / wheels[0].name, wheels[0].read_bytes())
-            write_json(
-                cache / "wheel.json",
-                {"identity": identity, "name": wheels[0].name, "sha256": file_hash(wheels[0])},
-            )
+        with host_lock(cache / "cache.lock") as lock:
+            with lock.commit():
+                atomic_bytes(cache / wheels[0].name, wheels[0].read_bytes())
+                write_json(
+                    cache / "wheel.json",
+                    {"identity": identity, "name": wheels[0].name, "sha256": file_hash(wheels[0])},
+                )
     run_logged(
         [python, "-m", "pip", "install", "--no-deps", wheels[0], harness_wheel],
         destination,

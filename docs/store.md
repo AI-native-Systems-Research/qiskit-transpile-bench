@@ -60,12 +60,20 @@ There is no command for it; maintain it by hand.
   next `compile` that needs it repairs it under `<key>.lock`; you can remove it when that lock
   is not held and no session is using it.
 
+Build and wheel-cache locks are created exclusively and record the holder's host, PID and
+acquisition time. A holder refreshes its lock every 30 seconds. Another process takes over
+when the lock has not been refreshed for 10 minutes, or when its PID is dead on the same
+host. This timeout assumes the hosts' clocks agree to within a few minutes. A `.break`
+directory briefly serializes takeover with normal release; an abandoned breaker uses the
+same 10-minute timeout.
+
 ## Layout
 
 ```text
 STORE/
   builds/<key>/          READY, build.json, env/, source/, cargo/, wheels/, build.log
   builds/<key>.lock      held while that key is being built
+  builds/<key>.lock.break/  temporary stale-takeover guard
   wheels/<identity>/     baseline Qiskit wheels
   quality/<key>/         baseline quality observations with their output and job files
                          and C6 snapshot artifacts for later audit proofs;
