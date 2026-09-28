@@ -130,13 +130,13 @@
               "maximum": 1
             },
             "max_load_per_cpu": {
+              "description": "Version 7 only: host load limit at both timeouts; version 8 gates load only in the cost stage",
               "type": "number",
               "exclusiveMinimum": 0
             }
           },
           "required": [
-            "baseline_fraction",
-            "max_load_per_cpu"
+            "baseline_fraction"
           ],
           "additionalProperties": false
         },

@@ -71,18 +71,25 @@ output and its metrics stand, and C6 is `unverified` for that seed.
   crashes fails the stage at once: batches not yet started are not run, and the finished
   ones keep their checkpoints.
 - **C1-lite off the commit path.** A batch's C1-lite requests go to the verifier as soon as
-  its checks finish. A verifier that stops making progress for 300 s leaves that check
-  `unverified`, which keeps `CA1/C1-lite` unresolved and names the seed.
+  its checks finish. A verifier that stops making progress for 300 s is killed, and the jobs
+  it left run once more in a fresh process. A second stall
+  leaves that check `unverified`, which keeps `CA1/C1-lite` unresolved and names the seed.
 
 ### Timeouts
 
 A seed that exceeds its case's `timeout_s` is killed and compiled once more, alone, in a fresh
-process; the later seeds of the batch run in another. A baseline seed that still fails is a
-failed reference record (`INCONCLUSIVE`). A candidate seed is `failed` only when it timed out
-twice, the same baseline seed completed without a retry within `baseline_fraction` (0.5) of the
-timeout, and the host load per CPU was at most `max_load_per_cpu` (1.0) at both timeouts
-(`quality_timeout` in the policy). Otherwise it is `unresolved`, with both attempts and the
-baseline timing in the record. Missing output never becomes a passing observation.
+process; the later seeds of the batch run in another. The retry does not wait for a quiet
+host: quality runs many tasks at once on a loaded host by design, and only the
+[cost](cost.md) stage gates on host load. A baseline seed that still fails is a failed
+reference record (`INCONCLUSIVE`). A candidate seed is `failed` only when it timed out twice
+and the same baseline seed completed without a retry within `baseline_fraction` (0.5) of the
+timeout (`quality_timeout` in the policy). The paired baseline, compiled on the same host
+under the same load, is the control; a host stall that slows both revisions leaves the
+baseline without its margin. Otherwise the seed is `unresolved`, with both attempts, their
+load per CPU and the baseline timing in the record. A version-7 policy also named
+`max_load_per_cpu` (1.0) and required the load per CPU within it at both timeouts; an
+archived version-7 session is still judged that way. Missing output never becomes a passing
+observation.
 
 ## Determinism audit
 

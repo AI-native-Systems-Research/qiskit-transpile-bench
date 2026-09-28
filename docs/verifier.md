@@ -31,8 +31,9 @@ Guarantees:
 
 One verifier process verifies a batch of jobs (`--batch`), so Qiskit is imported once per
 batch rather than once per check. Batches run across a process pool. A job that produces no
-result within 300 s, or whose process dies, is `unverified`; the jobs after it in the batch get
-a fresh process.
+result within 300 s is killed and run once more, with the rest of its batch, in a fresh process.
+A job that stalls again, or whose process dies, is `unverified`; the jobs after it in the batch
+get a fresh process.
 
 Verifier results are content-addressed. The key covers the output, reference and target file
 hashes, the oracle and its options, the harness implementation and the verifier locks. Each

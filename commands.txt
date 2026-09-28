@@ -19,18 +19,20 @@ uv run python lsf/submit.py --resume --upgrade-cost --store ./qtb-store \
 
 
 
-uv run python lsf/submit.py   --store ./qtb-store \
-    --results-root ./qtb-sessions/qiskit-confirm_profile-AA  \
-    --baseline /u/ophirazu/projects/qiskit  \
-    --evolved /u/ophirazu/projects/qiskit \
-    --profile confirm-profile  \
-    --cost-ncpus 56  \
-    --cost-max-r1m 10
+
 
 uv run python lsf/submit.py   --store ./qtb-store \
     --results-root ./qtb-sessions/qiskit-confirm_profile-0.83  \
     --baseline /u/ophirazu/projects/qiskit  \
     --evolved /u/ophirazu/projects/qiskit-evolve-0.83 \
+    --profile confirm-profile  \
+    --cost-ncpus 56  \
+    --cost-max-r1m 10
+
+uv run python lsf/submit.py   --store ./qtb-store \
+    --results-root ./qtb-sessions/qiskit-confirm_profile-AA  \
+    --baseline /u/ophirazu/projects/qiskit  \
+    --evolved /u/ophirazu/projects/qiskit \
     --profile confirm-profile  \
     --cost-ncpus 56  \
     --cost-max-r1m 10

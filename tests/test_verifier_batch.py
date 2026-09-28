@@ -1,5 +1,8 @@
 import shutil
 import sys
+from pathlib import Path
+
+import pytest
 
 from qtb.canonical import read_json
 from qtb.config import data_root
@@ -83,3 +86,41 @@ def test_a_stopped_batch_marks_only_its_current_job_unverified(tmp_path, monkeyp
     assert [r["status"] for r in results[1:]] == ["verified", "verified"]
     cache = comparison.directory / "verifier-cache"
     assert len(list(cache.rglob("*.json"))) == 2
+
+
+def _fake_verifier(tmp_path, stalls):
+    """A verifier that hangs on its first ``stalls`` launches and then verifies everything."""
+    launches = tmp_path / "launches"
+    fake = tmp_path / "fake-verifier"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys, time\n"
+        f"launches = pathlib.Path({str(launches)!r})\n"
+        "count = int(launches.read_text()) if launches.exists() else 0\n"
+        "launches.write_text(str(count + 1))\n"
+        "pairs = json.loads(pathlib.Path(sys.argv[sys.argv.index('--batch') + 1]).read_text())\n"
+        "for i, pair in enumerate(pairs):\n"
+        f"    if i == 1 and count < {stalls}: time.sleep(60)\n"
+        "    pathlib.Path(pair['out']).write_text('{\"status\": \"verified\"}')\n"
+    )
+    fake.chmod(0o755)
+    return fake, launches
+
+
+@pytest.mark.parametrize("stalls", [1, 2])
+def test_an_idle_verifier_is_retried_once(tmp_path, stalls):
+    from qtb.coordinator import process
+
+    fake, launches = _fake_verifier(tmp_path, stalls)
+    pairs = [{"job": "unused", "out": str(tmp_path / f"out-{i}.json")} for i in range(3)]
+
+    problem = process.run_verifier_batch(str(fake), pairs, tmp_path / "batch", idle_timeout=1)
+
+    assert launches.read_text() == "2"
+    # The retry runs only the jobs the stalled process left.
+    assert len(read_json(tmp_path / "batch" / "again.json")) == 2
+    if stalls == 1:
+        assert problem is None
+        assert all(Path(pair["out"]).exists() for pair in pairs)
+    else:
+        assert problem.startswith("Verifier timed out twice after 1 s")

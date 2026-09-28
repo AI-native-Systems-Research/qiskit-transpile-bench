@@ -64,7 +64,16 @@ Do not edit a frozen profile to accept a candidate. Recuration is an explicit ma
 operation using `tools/curate/curate.py`; comparisons consume only frozen artifacts.
 The original RevLib/HWB claims do not transfer to their declared generated replacements.
 
-Both profiles are at version 7 (design/updated_confirm_plan.md). Version 7 of the confirm
+Both profiles are at version 8. Version 8 changes only the quality timeout rule, in both
+policies: `quality_timeout` drops `max_load_per_cpu`, so a candidate timeout fails when it
+timed out twice and the paired baseline seed finished within `baseline_fraction` of the
+timeout, whatever the host load. Quality runs on a loaded host by design; only the cost stage
+gates on load. The key stays optional in the schema, and a version-7 policy that names it is
+judged by its own rule. The manifests change only their version. Because `quality_timeout` is
+part of the quality measurement protocol, stored baseline quality is computed again once for
+each profile.
+
+Version 7 (design/updated_confirm_plan.md) of the confirm
 profile changes seed blocks, roles, weights and the measurement protocol: `mcx_kg24_n5` at
 levels 1–3 becomes a deterministic case on 10 seeds (G5 weights recomputed),
 `multiplier_h18_n20` L2 goes from 20 to 100 seeds, and confirm-timing from 20 cases to 8. Its
@@ -74,7 +83,7 @@ policy adds `quality_batch_schedule`, `c1_lite_max_width` (22), `quality_timeout
 moves its C7 settings into the policy (`clifford_seeds` 3, no full mode) and adds
 `quality_timeout`; its manifest changes only its version. The unimplemented
 design/iterations-quality-coverage-plan.md also claimed version 7 for its expansion; it will
-need version 8.
+need version 9.
 
 Every new key is optional in the schema, and a policy without it keeps the rule of version 6:
 the fixed `quality_batch_size`, a C1-lite limit of 25, a candidate timeout that always fails,

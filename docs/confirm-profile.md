@@ -23,7 +23,7 @@ The profile is chosen once, on `compile`; the later stages read it from the sess
 [README](../README.md) for the stages, the store and the exit codes.
 
 Files: `profiles/confirm-profile/manifest.json` and `profiles/confirm-profile/policy.json`.
-Version 7 ([what changed](#version-7)).
+Version 8 ([what changed](#version-8)).
 
 > **Do not tune on this profile.** The workload is public and fixed, with no held-back part.
 > Editing a candidate and rerunning confirm until it passes turns it into a second tuning
@@ -164,6 +164,13 @@ Report-only numbers:
 
 Policy differences from the iterations profile: `practical_ratio` is 0.99 (versus 1.0), and
 the required set adds `CA3/breadth`, `CA1/C1-lite`, `CA5/confirm-timing` and `CA5/memory`.
+
+## Version 8
+
+Version 8 changes only the timeout rule: `quality_timeout` drops `max_load_per_cpu`. Host load
+is gated only in the cost stage; a candidate quality timeout is judged against the paired
+baseline seed alone ([quality](workflow/quality.md#timeouts)). The workload is unchanged from
+version 7.
 
 ## Version 7
 

@@ -243,6 +243,8 @@ def test_interrupted_seed_that_finishes_on_retry_keeps_its_result(tmp_path):
     rows = run_worker(dict(local_build(), python=str(fake_python)), job, tmp_path / "batch")
     assert [row["status"] for row in rows] == ["ok", "ok", "ok"]
     assert rows[1]["timeout_retries"] == 1 and len(rows[1]["attempts"]) == 1
+    # The retry runs at once: quality never waits for a quiet host.
+    assert "waited_s" not in rows[1]["attempts"][0]
     assert Path(rows[1]["job_file"]).parent.name == "again-1"
     # Cost modes are never retried: the failed entry ends the panel.
     marker.unlink()
@@ -582,16 +584,19 @@ def _timeout_row(seed, timeouts, load=0.1):
 @pytest.mark.parametrize(
     "timeouts, baseline_ns, load, rule, expected",
     [
-        # Repeated, the baseline finishes with a wide margin, quiet host: a real failure.
-        (2, 10 * 10**9, 0.1, True, "failed"),
+        # Repeated, and the baseline finishes with a wide margin: a real failure.
+        (2, 10 * 10**9, 0.1, "v8", "failed"),
+        # Host load does not matter: the paired baseline ran on the same loaded host.
+        (2, 10 * 10**9, 3.0, "v8", "failed"),
         # A single timeout (the retry did not time out but failed otherwise) is not enough.
-        (1, 10 * 10**9, 0.1, True, "unresolved"),
+        (1, 10 * 10**9, 0.1, "v8", "unresolved"),
         # The baseline itself is close to the timeout.
-        (2, 100 * 10**9, 0.1, True, "unresolved"),
-        # A loaded host.
-        (2, 10 * 10**9, 3.0, True, "unresolved"),
+        (2, 100 * 10**9, 3.0, "v8", "unresolved"),
+        # An archived version-7 rule keeps its load limit.
+        (2, 10 * 10**9, 0.1, "v7", "failed"),
+        (2, 10 * 10**9, 3.0, "v7", "unresolved"),
         # A policy before version 7 keeps the old rule.
-        (1, 100 * 10**9, 3.0, False, "failed"),
+        (1, 100 * 10**9, 3.0, None, "failed"),
     ],
 )
 def test_candidate_timeouts_fail_only_when_repeated_with_baseline_margin(
@@ -603,9 +608,9 @@ def test_candidate_timeouts_fail_only_when_repeated_with_baseline_margin(
     policy = dict(policy, measurement_protocol=dict(policy["measurement_protocol"]))
     policy["measurement_protocol"].pop("quality_timeout", None)
     if rule:
-        policy["measurement_protocol"]["quality_timeout"] = {
-            "baseline_fraction": 0.5, "max_load_per_cpu": 1.0,
-        }
+        policy["measurement_protocol"]["quality_timeout"] = {"baseline_fraction": 0.5}
+    if rule == "v7":
+        policy["measurement_protocol"]["quality_timeout"]["max_load_per_cpu"] = 1.0
     comparison = _quality_comparison(
         tmp_path, policy, {"baseline": {"id": "base"}, "evolved": {"id": "idea"}}
     )

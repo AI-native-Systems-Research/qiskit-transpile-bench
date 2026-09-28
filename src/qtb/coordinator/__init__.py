@@ -990,9 +990,12 @@ class Comparison:
         A seed that was never attempted is unresolved. A baseline failure is a failed
         reference record. A candidate timeout (after its fresh-process retry) fails only
         when it timed out twice, the same baseline seed completed within
-        ``quality_timeout.baseline_fraction`` of the timeout without a retry, and the host
-        load per CPU stayed within ``max_load_per_cpu`` at both timeouts; otherwise it is
-        unresolved. Without that policy key a timeout fails, as before version 7.
+        ``quality_timeout.baseline_fraction`` of the timeout without a retry; otherwise it is
+        unresolved. The paired baseline, measured on the same loaded host, is the control:
+        host load is gated only in the cost stage. A version-7 rule that still names
+        ``max_load_per_cpu`` also requires the load per CPU within it at both timeouts, so an
+        archived session is judged by its own rule. Without that policy key a timeout fails,
+        as before version 7.
         """
         result = row["worker"]
         subject = "reference" if row["revision"] == "baseline" else "evolved"
@@ -1018,20 +1021,17 @@ class Comparison:
                     and isinstance(baseline.get("compile_ns"), int)
                     and baseline["compile_ns"] <= rule["baseline_fraction"] * timeout_ns
                 )
-                quiet = bool(attempts) and all(
-                    a.get("load_per_cpu") is not None
-                    and a["load_per_cpu"] <= rule["max_load_per_cpu"]
-                    for a in attempts
-                )
                 repeated = result.get("timeouts", 1) >= 2
-                if not (repeated and margin and quiet):
+                classification = {"repeated": repeated, "baseline_margin": margin, "rule": rule}
+                if "max_load_per_cpu" in rule:
+                    classification["quiet_host"] = bool(attempts) and all(
+                        a.get("load_per_cpu") is not None
+                        and a["load_per_cpu"] <= rule["max_load_per_cpu"]
+                        for a in attempts
+                    )
+                if not (repeated and margin and classification.get("quiet_host", True)):
                     status = "unresolved"
-                details["classification"] = {
-                    "repeated": repeated,
-                    "baseline_margin": margin,
-                    "quiet_host": quiet,
-                    "rule": rule,
-                }
+                details["classification"] = classification
         return record(f"failure/{row['id']}", "completeness", status, subject, **details)
 
     def audit(self, cases, observations, revisions=("baseline", "evolved")):

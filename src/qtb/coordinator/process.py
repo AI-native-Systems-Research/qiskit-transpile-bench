@@ -65,8 +65,9 @@ def run_worker(build, job, directory, hash_seed="0", hooks=None, retry_timeout=T
     (``RETRIED_MODES``, never under ``hooks``) that seed is then compiled once more alone in
     a fresh process: a second timeout leaves it an error with ``timeouts: 2``, a success
     keeps the retried result with ``timeout_retries: 1``. Either way the seed's row records
-    each attempt's timeout and host load per CPU, which ``quality`` needs to classify a
-    candidate timeout. The later seeds of the batch run in another fresh process.
+    each attempt's timeout and host load per CPU. The retry does not wait for a quiet host:
+    quality runs on a loaded host by design, and only the cost stage gates on load. The later
+    seeds of the batch run in another fresh process.
     """
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
@@ -241,12 +242,26 @@ def run_verifier_batch(python, pairs, directory, idle_timeout=300):
     """Verify ``pairs`` ({job, out}) in one pinned verifier process.
 
     The idle timeout applies per job: the process is killed once no new result has appeared
-    for ``idle_timeout`` seconds. Returns a reason when it stopped before finishing.
+    for ``idle_timeout`` seconds. The jobs left then run once more in a fresh process.
+    Returns a reason when that process also stopped before finishing.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    write_json(directory / "batch.json", pairs)
-    command = [python, "-P", "-m", "qtb_verifier", "--batch", str(directory / "batch.json")]
+    returncode, timed_out = _verify(python, pairs, directory, "batch.json", idle_timeout)
+    remaining = [pair for pair in pairs if not Path(pair["out"]).exists()]
+    if timed_out and remaining:
+        returncode, timed_out = _verify(python, remaining, directory, "again.json", idle_timeout)
+    if all(Path(pair["out"]).exists() for pair in remaining):
+        return None
+    if timed_out:
+        return f"Verifier timed out twice after {idle_timeout} s; log: {directory / 'verifier.log'}"
+    return f"Verifier exited {returncode}; log: {directory / 'verifier.log'}"
+
+
+def _verify(python, pairs, directory, name, idle_timeout):
+    """One verifier process over ``pairs``; returns its exit code and whether it idled out."""
+    write_json(directory / name, pairs)
+    command = [python, "-P", "-m", "qtb_verifier", "--batch", str(directory / name)]
     outs = [Path(pair["out"]) for pair in pairs]
     done, last, timed_out = 0, time.monotonic(), False
     with (directory / "verifier.log").open("ab") as log:
@@ -273,8 +288,4 @@ def run_verifier_batch(python, pairs, directory, idle_timeout=300):
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
-    if all(out.exists() for out in outs):
-        return None
-    if timed_out:
-        return f"Verifier timed out after {idle_timeout} s; log: {directory / 'verifier.log'}"
-    return f"Verifier exited {process.returncode}; log: {directory / 'verifier.log'}"
+    return process.returncode, timed_out

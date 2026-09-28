@@ -23,9 +23,10 @@ See the [README](../README.md) for the stages, the store and the exit codes.
 
 Files: `profiles/iterations-profile/manifest.json` (the workload) and
 `profiles/iterations-profile/policy.json` (thresholds and measurement protocol). Both are
-version 7: the C7 settings are policy keys (`clifford_seeds` 3, `clifford_full_mode` false)
-and `quality_timeout` classifies a candidate timeout ([quality](workflow/quality.md#timeouts));
-the workload is unchanged from version 6.
+version 8. Version 7 made the C7 settings policy keys (`clifford_seeds` 3,
+`clifford_full_mode` false) and added `quality_timeout`, which classifies a candidate timeout
+([quality](workflow/quality.md#timeouts)); version 8 drops its `max_load_per_cpu`, so only
+the cost stage gates on host load. The workload is unchanged from version 6.
 
 ## What it asks
 
