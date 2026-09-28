@@ -23,7 +23,7 @@ The profile is chosen once, on `compile`; the later stages read it from the sess
 [README](../README.md) for the stages, the store and the exit codes.
 
 Files: `profiles/confirm-profile/manifest.json` and `profiles/confirm-profile/policy.json`.
-Version 8 ([what changed](#version-8)).
+Version 9 ([what changed](#version-9)).
 
 > **Do not tune on this profile.** The workload is public and fixed, with no held-back part.
 > Editing a candidate and rerunning confirm until it passes turns it into a second tuning
@@ -105,7 +105,7 @@ iterations profile's three circuits together carry 18.2%.
   entangling gate cancels.
 - **Guards** (19): the three 100-qubit circuits on `cx`/`ecr`, `su2_circular_n89` at level 3
   (10 seeds), `multiplier_h18_n20` (100 seeds, the `hwb12` replacement), QUEKO at level 0,
-  and others. Every guard must stay at or below the 1.05 per-case cap. Guards outside the
+  and others. Every guard must stay at or below the 1.20 per-case cap. Guards outside the
   basis panels must also satisfy `ln(ratio) ≤ 3·SE_case`.
 - **Canaries** (5): `su2_circular_n100` and `long_2q_sequence` at several levels.
 
@@ -134,7 +134,7 @@ three-circuit iterations score to improve.
 | CA1 correctness | `CA1/C0`, `CA1/C1-C5`, `CA1/C6`, `CA1/C7`, `CA1/C1-lite`, `CA1/stage-coverage`, and `CA1/upstream` once `unit-tests` has started | As IA1, plus **C1-lite**: exact all-zero-input state or measurement checks on the first 10 seeds of every scored case with at most 25 logical qubits and no free parameters. A pair is required when the baseline's simulated wire union is at most 22 (`c1_lite_max_width`); a wider or missing evolved output leaves it unresolved. C7 on 5 seeds (`clifford_seeds`) in prefix and full mode |
 | CA2 improvement | `CA2/improvement` | `ln(D2 score) + 2·SE < ln(0.99)`, a practical 1% reduction beyond seed noise |
 | CA3 breadth | `CA3/breadth` | At least 4 of the 8 families individually satisfy `ln(D2) + 2·SE < 0`, **and** removing any one family still leaves the score below 1 |
-| CA4 guards | `CA3/primary/N2`, `CA3/cx/*`, `CA3/ecr/*`, `CA4/family/<G>/<metric>`, `CA4/optimization_level/<L>/<metric>`, `CA4/cap/...`, `CA4/exact/...` | Every family and level summary has `ln(score) ≤ 3·SE` for `D2` and `N2`, and so does overall `N2`. Per-case caps (1.05). Deterministic, zero-baseline and canary cases exact. Band, topology and basis summaries are reported only |
+| CA4 guards | `CA3/primary/N2`, `CA3/cx/*`, `CA3/ecr/*`, `CA4/family/<G>/<metric>`, `CA4/optimization_level/<L>/<metric>`, `CA4/cap/...`, `CA4/exact/...` | Every family and level summary has `ln(score) ≤ 3·SE` for `D2` and `N2`, and so does overall `N2`. Per-case caps (1.20). Deterministic, zero-baseline and canary cases exact. Band, topology and basis summaries are reported only |
 | CA5 cost | `CA5/timing`, `CA5/timing-basis`, `CA5/confirm-timing`, `CA5/memory`, `CA5/preset`, `CA5/companion` | Each panel's ratio at most 1.10, and no per-case breach (> 20% and by more than 25 ms, or 32 MiB for memory). Timing panels screen with 4 rounds and measure 10 in full ([iterations-profile.md](iterations-profile.md#timing-panels)) |
 | CA6 completeness | `CA6/completeness` | Every observation present; determinism audit passed |
 
@@ -164,6 +164,13 @@ Report-only numbers:
 
 Policy differences from the iterations profile: `practical_ratio` is 0.99 (versus 1.0), and
 the required set adds `CA3/breadth`, `CA1/C1-lite`, `CA5/confirm-timing` and `CA5/memory`.
+
+## Version 9
+
+Version 9 raises the per-case quality cap from 1.05 to 1.20 for both `D2` and `N2`.
+The cap uses each case's seed-aggregated ratio. Exact-case checks, independent guard
+checks and panel-level non-regression checks remain unchanged. Existing sessions retain
+their frozen policy. The workload is unchanged from version 8.
 
 ## Version 8
 

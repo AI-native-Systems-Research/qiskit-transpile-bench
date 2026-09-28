@@ -161,7 +161,7 @@ def test_decide_replays_synthetic_session_to_known_verdict(tmp_path, guard_regre
         }
         for row in rows:
             if row["case_id"] == guard["case_id"] and row["revision"] == "evolved":
-                row["D2"] = baseline[row["seed"]] * 1.08
+                row["D2"] = baseline[row["seed"]] * (policy["quality_cap"] + 0.03)
     complete = {"status": "complete"}
     states = {
         "compile": complete,
@@ -375,6 +375,8 @@ def _set_case_differences(rows, case_id, differences, metric="D2"):
 
 def _cap_record(rule, differences, role="scored"):
     manifest, policy, rows, evidence = synthetic("confirm-profile", ratio=1.0)
+    # Exercise the archived 5% policy independently of the current shipped cap.
+    policy["quality_cap"] = 1.05
     if rule is None:
         policy.pop("quality_cap_rule", None)
     else:
@@ -390,6 +392,22 @@ def _cap_record(rule, differences, role="scored"):
 
 def _alternating(mean, spread, n=100):
     return [mean + spread * (-1) ** s for s in range(n)]
+
+
+@pytest.mark.parametrize("profile", ["iterations-profile", "confirm-profile"])
+@pytest.mark.parametrize("metric", ["D2", "N2"])
+@pytest.mark.parametrize("ratio, expected", [(1.19, "passed"), (1.21, "failed")])
+def test_shipped_per_case_cap_allows_twenty_percent(profile, metric, ratio, expected):
+    manifest, policy, rows, evidence = synthetic(profile, ratio=1.0)
+    assert policy["quality_cap"] == 1.20
+    case = next(c for c in manifest["cases"] if c["role"] == "scored")
+    _set_case_differences(
+        rows, case["case_id"], [math.log(ratio)] * case["seeds_per_block"], metric
+    )
+    records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
+    prefix = "CA" if profile == "confirm-profile" else "IA"
+    cap = next(r for r in records if r["id"] == f"{prefix}4/cap/{case['case_id']}/{metric}")
+    assert cap["result"] == expected
 
 
 @pytest.mark.parametrize("role", ["scored", "guard"])

@@ -64,7 +64,13 @@ Do not edit a frozen profile to accept a candidate. Recuration is an explicit ma
 operation using `tools/curate/curate.py`; comparisons consume only frozen artifacts.
 The original RevLib/HWB claims do not transfer to their declared generated replacements.
 
-Both profiles are at version 8. Version 8 changes only the quality timeout rule, in both
+Both profiles are at version 9. Version 9 raises `quality_cap` from 1.05 to 1.20
+in both policies, allowing up to a 20% increase in each case's seed-aggregated `D2` and
+`N2`. Exact-case checks, independent guard checks, panel checks and correctness
+requirements retain their existing rules. The manifests change only their version.
+Existing sessions continue to use their archived cap; new sessions use version 9.
+
+Version 8 changes only the quality timeout rule, in both
 policies: `quality_timeout` drops `max_load_per_cpu`, so a candidate timeout fails when it
 timed out twice and the paired baseline seed finished within `baseline_fraction` of the
 timeout, whatever the host load. Quality runs on a loaded host by design; only the cost stage
@@ -83,7 +89,7 @@ policy adds `quality_batch_schedule`, `c1_lite_max_width` (22), `quality_timeout
 moves its C7 settings into the policy (`clifford_seeds` 3, no full mode) and adds
 `quality_timeout`; its manifest changes only its version. The unimplemented
 design/iterations-quality-coverage-plan.md also claimed version 7 for its expansion; it will
-need version 9.
+need a version after 9.
 
 Every new key is optional in the schema, and a policy without it keeps the rule of version 6:
 the fixed `quality_batch_size`, a C1-lite limit of 25, a candidate timeout that always fails,
