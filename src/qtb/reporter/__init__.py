@@ -1,6 +1,7 @@
 """Decision and report artifacts, without any Qiskit import."""
 
 import math
+from collections import Counter
 from pathlib import Path
 from statistics import fmean
 
@@ -249,49 +250,8 @@ def _render_quality_comparison(decision):
     return lines + [""]
 
 
-def render_report(decision):
-    lines = [f"# {decision['status']} — {decision['profile']}", ""]
-    if decision.get("stages"):
-        lines += [
-            "## Stages",
-            "",
-            "| Stage | State | Host | Duration | Note |",
-            "| --- | --- | --- | ---: | --- |",
-        ]
-        for row in decision["stages"]:
-            seconds = row.get("seconds")
-            shown = _duration(seconds) if isinstance(seconds, (int, float)) else "—"
-            lines.append(
-                f"| {row['stage']} | {row['status']} | {row.get('host') or '—'} | {shown} | "
-                f"{row.get('note') or ''} |"
-            )
-        lines.append("")
-    if decision.get("notes"):
-        lines += [f"- {note}" for note in decision["notes"]] + [""]
-    lines += [
-        "The baseline named for this comparison is the reference for every test.",
-        "Iterate on iterations-profile; use confirm-profile as a check, not a tuning loop.",
-        "This verdict concerns the fixed workload and its declared semantic contracts.",
-        "",
-    ]
-    fixed = decision.get("cost_thresholds")
-    if fixed:
-        lines += [
-            "Cost thresholds are fixed by policy, not calibrated on this machine: "
-            f"panel ≤ {fixed['panel_ratio']:.2f}×, a case counts only above "
-            f"{fixed['case_ratio']:.2f}× and {fixed['case_floor_ns'] / 1e6:.0f} ms "
-            f"({fixed['case_floor_bytes'] / 2**20:.0f} MiB for memory); the screen must "
-            f"clear {fixed['screen_fraction']:.0%} of the panel band.",
-            "",
-        ]
-    if decision["reasons"] or decision["missing_records"]:
-        lines += ["## Constraints needing attention", ""]
-        for reason in decision["reasons"]:
-            lines.append(f"- **{reason['result']}** `{reason['code']}`: {reason['detail']}")
-        for missing in decision["missing_records"]:
-            lines.append(f"- **missing** `{missing}`")
-        lines.append("")
-    lines += ["## Quality stage improvement", ""]
+def _render_quality_results(decision):
+    lines = ["## Quality stage improvement", ""]
     if decision.get("objective"):
         objective = decision["objective"][0]
         lines += [
@@ -412,6 +372,52 @@ def render_report(decision):
             lines.append(f"| {row['case_id']} | {row['metric']} | unavailable | — | — | — |")
     if zero.get("status") != "reported":
         lines.append(f"Unavailable: {zero.get('reason', 'No paired observations')}.")
+    return lines
+
+
+def render_report(decision):
+    lines = [f"# {decision['status']} — {decision['profile']}", ""]
+    if decision.get("stages"):
+        lines += [
+            "## Stages",
+            "",
+            "| Stage | State | Host | Duration | Note |",
+            "| --- | --- | --- | ---: | --- |",
+        ]
+        for row in decision["stages"]:
+            seconds = row.get("seconds")
+            shown = _duration(seconds) if isinstance(seconds, (int, float)) else "—"
+            lines.append(
+                f"| {row['stage']} | {row['status']} | {row.get('host') or '—'} | {shown} | "
+                f"{row.get('note') or ''} |"
+            )
+        lines.append("")
+    if decision.get("notes"):
+        lines += [f"- {note}" for note in decision["notes"]] + [""]
+    lines += [
+        "The baseline named for this comparison is the reference for every test.",
+        "Iterate on iterations-profile; use confirm-profile as a check, not a tuning loop.",
+        "This verdict concerns the fixed workload and its declared semantic contracts.",
+        "",
+    ]
+    fixed = decision.get("cost_thresholds")
+    if fixed:
+        lines += [
+            "Cost thresholds are fixed by policy, not calibrated on this machine: "
+            f"panel ≤ {fixed['panel_ratio']:.2f}×, a case counts only above "
+            f"{fixed['case_ratio']:.2f}× and {fixed['case_floor_ns'] / 1e6:.0f} ms "
+            f"({fixed['case_floor_bytes'] / 2**20:.0f} MiB for memory); the screen must "
+            f"clear {fixed['screen_fraction']:.0%} of the panel band.",
+            "",
+        ]
+    if decision["reasons"] or decision["missing_records"]:
+        lines += ["## Constraints needing attention", ""]
+        for reason in decision["reasons"]:
+            lines.append(f"- **{reason['result']}** `{reason['code']}`: {reason['detail']}")
+        for missing in decision["missing_records"]:
+            lines.append(f"- **missing** `{missing}`")
+        lines.append("")
+    lines += _render_quality_results(decision)
     lines += [
         "",
         "## Compilation cost",
@@ -494,3 +500,82 @@ def write_report(directory, decision):
     directory = Path(directory)
     write_json(directory / "decision.json", decision)
     atomic_bytes(directory / "report.md", render_report(decision).encode())
+
+
+def write_quality_report(
+    directory, run, records, required_ids, summaries, observations, manifest, policy,
+    gate, gate_reason,
+):
+    """Save quality evidence before the stage commits, including closed-gate results.
+
+    This is a stage snapshot, not the final benchmark verdict. Reuse the decision's
+    estimators and rendering so quality and decide display the same statistics.
+    """
+    decision = make_decision(
+        run, records, required_ids, summaries, observations, manifest, policy,
+    )
+    prefix = "CA" if run["profile"] == "confirm-profile" else "IA"
+    by_id = {row["id"]: row for row in records}
+
+    def score(name):
+        summary = summaries.get(name)
+        if summary is None:
+            return {
+                "status": "unavailable",
+                "reason": by_id.get(name, {}).get("detail") or "No complete paired estimate",
+            }
+        return summary
+
+    report = {
+        "format": "qtb-quality-report/1",
+        "stage": "quality",
+        "gate": gate,
+        "gate_reason": gate_reason,
+        "quality_status": decision["status"],
+        "quality_cap": policy["quality_cap"],
+        "quality_cap_rule": policy.get("quality_cap_rule", "plain"),
+        "overall": {
+            "D2": score(f"{prefix}2/improvement"),
+            "N2": score(f"{prefix}3/primary/N2"),
+        },
+        "families": {
+            family: {
+                metric: score(f"{prefix}4/family/{family}/{metric}")
+                for metric in ("D2", "N2")
+            }
+            for family in sorted({c["family"] for c in manifest["cases"] if c["role"] == "scored"})
+        },
+        "constraint_counts": dict(sorted(Counter(row["result"] for row in records).items())),
+        **{key: decision[key] for key in (
+            "profile", "run_id", "hashes", "identities", "seed_block", "measurement_timestamp",
+            "objective", "trade_score", "quality_comparison", "zero_baseline_deltas",
+            "summaries", "constraints", "required_ids", "reasons", "missing_records",
+        )},
+    }
+    lines = [
+        f"# Quality report — {run['profile']}", "",
+        f"Gate: **{gate}** — {gate_reason}", "",
+        f"Quality checks: **{report['quality_status']}**. This is a quality-stage snapshot; "
+        "run `decide` for the final benchmark verdict, including correctness and cost.", "",
+        f"Per-case quality cap: {policy['quality_cap']:.2f}× "
+        f"(seed-aggregated; rule: {report['quality_cap_rule']}).", "",
+        "Overall scores cover the primary scored panel using frozen weights. Family and "
+        "other marginal scores normalize those weights within their scored subset. "
+        "Ratios below 1 improve on baseline; paired standard errors are in log space. "
+        "The trade score is descriptive and does not determine the gate.", "",
+        "## Check results", "",
+        "| Result | Count |", "| --- | ---: |",
+    ]
+    lines += [f"| {result} | {count} |" for result, count in report["constraint_counts"].items()]
+    lines += ["", "## Checks needing attention", ""]
+    for reason in report["reasons"]:
+        lines.append(f"- **{reason['result']}** `{reason['code']}`: {reason['detail']}")
+    for missing in report["missing_records"]:
+        lines.append(f"- **missing** `{missing}`")
+    if not report["reasons"] and not report["missing_records"]:
+        lines.append("None.")
+    lines += [""] + _render_quality_results(report)
+    directory = Path(directory)
+    write_json(directory / "report.json", report)
+    atomic_bytes(directory / "report.md", ("\n".join(lines) + "\n").encode())
+    return report

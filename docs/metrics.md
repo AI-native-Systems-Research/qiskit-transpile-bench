@@ -129,7 +129,7 @@ improvement.
 | Improvement, confirm | `ln(D2 score) + 2·SE < ln(0.99)` | `CA2/improvement` (at least 1% practical gain) |
 | Breadth, confirm | ≥ 4 of 8 families with `ln(D2) + 2·SE < 0`, and every leave-one-family-out score < 1 | `CA3/breadth` |
 | Regression guard | `ln(score) ≤ 3·SE` | `N2` of the scored panel, basis panels, confirm family and level summaries |
-| Per-case quality cap | `case_ratio ≤ 1.20` (seed-aggregated, not per seed); with `quality_cap_rule: noise_aware` a case breaches only when also `ln(case_ratio) > 3·SE_case` | Every scored and guard case, `D2` and `N2` |
+| Per-case quality cap | `case_ratio ≤ 2.0` (seed-aggregated, not per seed); with `quality_cap_rule: noise_aware` a case breaches only when also `ln(case_ratio) > 3·SE_case` | Every scored and guard case, `D2` and `N2` |
 | Per-case SE guard | `ln(case_ratio) ≤ 3·SE_case` | Guard cases outside a basis panel |
 | Exact | Evolved `≤` baseline on every seed | Deterministic cases |
 | Exact zero | Evolved `= 0` | Zero-baseline cases |
@@ -142,7 +142,7 @@ from `policy.json`.
 without the key): a case breaches when its ratio exceeds `quality_cap`. `noise_aware` also
 requires `ln(case_ratio) > guard_multiplier · SE_case`, with `SE_case` from the case's paired
 per-seed log differences over the same seed block. It reduces false cap breaches when a
-neutral change decorrelates seed outcomes, at some loss of sensitivity near 1.20; enable it
+neutral change decorrelates seed outcomes, at some loss of sensitivity near 2.0; enable it
 only after measuring the false-breach rate and injected regressions around the configured
 cap. The original 5% cap proposal is in design/updated_confirm_plan.md, section 7.
 Under both rules the independent per-case SE

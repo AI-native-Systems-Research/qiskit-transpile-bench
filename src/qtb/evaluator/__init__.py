@@ -276,4 +276,19 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
         report_summary("leave_iterations_out/N2", rest, "N2")
     elif confirm:
         required.add("CA3/breadth")
+    # Fill report-only marginals for iterations, and explicit unavailable entries when
+    # confirm could not form its objective. These never add constraints or alter the gate.
+    for dimension in ("family", "optimization_level", "size_band", "topology", "native_basis"):
+        for value in sorted({c[dimension] for c in scored}, key=str):
+            subset = [c for c in scored if c[dimension] == value]
+            for metric in ("D2", "N2"):
+                name = f"{prefix}4/{dimension}/{value}/{metric}"
+                if name in summaries:
+                    continue
+                try:
+                    if not panel_valid:
+                        raise Incomplete("Round-trip or determinism audit evidence is missing")
+                    summaries[name] = paired_panel(subset, observations, metric)
+                except (Incomplete, HarnessError) as exc:
+                    summaries[name] = {"status": "unavailable", "reason": str(exc)}
     return records, sorted(required), summaries

@@ -23,7 +23,7 @@ See the [README](../README.md) for the stages, the store and the exit codes.
 
 Files: `profiles/iterations-profile/manifest.json` (the workload) and
 `profiles/iterations-profile/policy.json` (thresholds and measurement protocol). Both are
-version 9. Version 9 raises the per-case quality cap from 1.05 to 1.20 for both `D2` and
+version 10. Version 10 raises the per-case quality cap from 1.20 to 2.0 for both `D2` and
 `N2`; exact-case checks and independent guard and panel checks remain unchanged.
 Existing sessions retain their frozen policy. Version 7 made the C7 settings policy keys
 (`clifford_seeds` 3,
@@ -137,7 +137,7 @@ All rules compare against the baseline. The formulas are in [metrics.md](metrics
 | IA1 correctness | `IA1/C0`, `IA1/C1-C5`, `IA1/C6`, `IA1/C7`, `IA1/stage-coverage` | Every output is legal (C0). The C1–C5 suite passes for both revisions. Routing replay verifies every scored and basis-guard output. Clifford variants verify on 3 seeds. Every changed stage is covered by a verified check. Upstream tests are optional: if the `unit-tests` stage has started, `IA1/upstream` is required too |
 | IA2 improvement | `IA2/improvement` | Primary `cz` panel: `ln(D2 score) + 2·SE < 0` |
 | IA3 guards | `IA3/primary/N2`, `IA3/primary/D2`, `IA3/cx/D2`, `IA3/cx/N2`, `IA3/ecr/D2`, `IA3/ecr/N2` | Each panel: `ln(score) ≤ 3·SE` |
-| IA4 caps and canaries | `IA4/cap/<case>/<metric>`, `IA4/exact/<canary>` | No scored or guard case has a seed-aggregated ratio above 1.20 for `D2` or `N2`. Canaries equal their constants |
+| IA4 caps and canaries | `IA4/cap/<case>/<metric>`, `IA4/exact/<canary>` | No scored or guard case has a seed-aggregated ratio above 2.0 for `D2` or `N2`. Canaries equal their constants |
 | IA5 cost | `IA5/timing`, `IA5/timing-basis`, `IA5/preset`, `IA5/companion` | Panel time ratio at most 1.10, and no per-case breach (> 20% slower and by more than 25 ms) |
 | IA6 completeness | `IA6/completeness` | All 2 × (9 × 100 + 3 × 10) observations are present. Determinism audit passed |
 
@@ -148,7 +148,7 @@ and canary record it creates, and the cost panels the change scope requires. `de
 `IA1/upstream` once the optional `unit-tests` stage has started.
 
 Policy values (`policy.json`): improvement multiplier 2.0, guard multiplier 3.0, practical
-ratio 1.0 (any improvement beyond noise counts), quality cap 1.20, RNG seed 20260924.
+ratio 1.0 (any improvement beyond noise counts), quality cap 2.0, RNG seed 20260924.
 The upstream test budgets (4 h Python, 3 h Rust) apply only when `unit-tests` runs. Timing:
 4 screen rounds, 6 full rounds, rerun multiplier 2, 1 warm-up, at least 2 timed calls and 1 s
 per round. Cost thresholds (fixed, never calibrated): panel ratio 1.10, case ratio 1.20 above

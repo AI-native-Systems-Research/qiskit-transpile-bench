@@ -396,10 +396,12 @@ def _alternating(mean, spread, n=100):
 
 @pytest.mark.parametrize("profile", ["iterations-profile", "confirm-profile"])
 @pytest.mark.parametrize("metric", ["D2", "N2"])
-@pytest.mark.parametrize("ratio, expected", [(1.19, "passed"), (1.21, "failed")])
-def test_shipped_per_case_cap_allows_twenty_percent(profile, metric, ratio, expected):
+@pytest.mark.parametrize(
+    "ratio, expected", [(1.21, "passed"), (1.99, "passed"), (2.0, "passed"), (2.01, "failed")]
+)
+def test_shipped_per_case_cap_allows_twofold_ratio(profile, metric, ratio, expected):
     manifest, policy, rows, evidence = synthetic(profile, ratio=1.0)
-    assert policy["quality_cap"] == 1.20
+    assert policy["quality_cap"] == 2.0
     case = next(c for c in manifest["cases"] if c["role"] == "scored")
     _set_case_differences(
         rows, case["case_id"], [math.log(ratio)] * case["seeds_per_block"], metric

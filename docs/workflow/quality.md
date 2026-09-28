@@ -166,6 +166,25 @@ against it that gets through the gate.
 
 ## Outputs and retries
 
+Every completed quality stage automatically saves `stages/quality/report.md` and
+`stages/quality/report.json`, including when the gate is closed. No extra flag or `decide`
+step is needed. The Markdown report includes overall D2/N2 ratios and improvement
+percentages, a descriptive combined trade score, scores per family and other dimensions,
+paired standard errors, seed counts, per-case baseline/evolved means and ratios, worst
+seeds, zero-baseline deltas, and checks needing attention. Confirm also includes the
+instance-bootstrap and held-out estimates when available.
+
+The JSON report (`qtb-quality-report/1`) exposes `overall`, `families`, `trade_score`,
+`constraint_counts`, all evaluator `summaries` (including per-seed log differences),
+`quality_comparison`, constraints and provenance. Missing or invalid estimates are marked
+unavailable; they are never treated as passing scores. Scores use the frozen geometric
+weighting, with lower ratios better; arithmetic means are descriptive. Iterations family
+and marginal summaries are report-only and introduce no additional guards.
+
+These files describe the quality gate, not the final benchmark verdict. `decide` still
+writes the session-level report after considering the other stages. The stage reports
+survive `clean` and are authoritative once `stages/quality/state.json` is `complete`.
+
 The stage writes `observations.jsonl` and its own state, evidence and progress log under
 `stages/quality/`. The committed state records `gate` and `gate_reason`. Missing required
 quality records, `not_evaluated` checks and unresolved checks close the gate. The gate

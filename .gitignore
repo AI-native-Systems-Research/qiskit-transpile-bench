@@ -54,3 +54,5 @@ results/
 repro/
 qtb-store/
 qtb-sessions/
+output/
+tmp/

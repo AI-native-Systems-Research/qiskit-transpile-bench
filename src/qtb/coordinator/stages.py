@@ -56,6 +56,7 @@ from qtb.coordinator.store import resolve_store
 from qtb.envbuild import SERIAL, host_mismatch
 from qtb.errors import Contaminated, HarnessError, Incomplete, Precondition, Usage
 from qtb.evaluator import evaluate_quality, record
+from qtb.reporter import write_quality_report
 
 STAGE_ORDER = ("compile", "quality", "correctness", "unit-tests", "cost")
 PREREQUISITES = {
@@ -167,7 +168,7 @@ def quality_body(comparison):
         comparison.audit(cases, rows)
     with step(comparison, "Aggregate checks"):
         comparison.aggregate_checks(cases, rows)
-    records, required_ids, _ = evaluate_quality(
+    records, required_ids, summaries = evaluate_quality(
         comparison.manifest,
         comparison.policy,
         rows,
@@ -190,6 +191,11 @@ def quality_body(comparison):
     if prefix == "CA":
         improvement_ids.add("CA3/breadth")
     state, reason = gate(comparison.run["builds"], records, required_quality, improvement_ids)
+    write_quality_report(
+        comparison.stage_dir, comparison.run, records, required_quality, summaries,
+        rows, comparison.manifest, comparison.policy, state, reason,
+    )
+    comparison.progress(f"Quality report: {comparison.stage_dir / 'report.md'} (and report.json).")
     comparison.progress(f"Gate: {state}: {reason}.")
     reused = sorted({r["cached_from"] for r in rows if r.get("cached_from")})
     return {

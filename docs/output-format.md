@@ -26,6 +26,7 @@ Cleaned /…/sessions/idea1: freed 1.42 GiB in 38 items.
 | You want | Open |
 | --- | --- |
 | The verdict and why, in words | `report.md` |
+| Quality scores and diagnostics immediately after quality | `stages/quality/report.md` or `stages/quality/report.json` |
 | The verdict for scripts or CI | the exit code of `decide`, or `decision.json` → `status` |
 | Which stages ran, where and for how long | the "Stages" table at the top of `report.md`, or `stages/<stage>/state.json` |
 | Why a stage failed or was skipped | `stages/<stage>/state.json` → `reason`, then `stages/<stage>/progress.log` |
@@ -62,6 +63,7 @@ can contain failed checks and still exit 0; `decide` reports their effect on the
 | `oracle-jobs/<uuid>/` | Verifier | `job.json`, `result.json` for each distinct verifier job not already cached |
 | `oracle-jobs/batch-<uuid>/` | Verifier | `batch.json` (the jobs one verifier process ran, in order) and its `verifier.log` |
 | `stages/<stage>/state.json` | That stage | The stage's state ([below](#stagesstagestatejson)) |
+| `stages/quality/report.md`, `stages/quality/report.json` | `quality` | Quality-stage snapshot (`qtb-quality-report/1`): gate, overall and family scores, detailed statistics, constraints and provenance; saved even when the gate closes ([details](workflow/quality.md#outputs-and-retries)) |
 | `stages/quality/batches/<key>.json` | `quality` | One checkpoint per finished quality batch: its revision, case, seeds and observations. `observations.jsonl` is written from these in plan order; a retry skips checkpointed batches |
 | `stages/quality/audit/<observation>-<hash seed>.json` | `quality` | One determinism-audit comparison per audited seed: `status` (`passed`, `passed_vf2_tie` or `unresolved`), the first differing `field`, the `reason`, and for a difference the first differing pass (`first`), the physical-wire `permutation`, and the `metrics` and check `outcomes` of both compiles |
 | `stages/<stage>/evidence.json` | That stage | The constraint records the stage produced |

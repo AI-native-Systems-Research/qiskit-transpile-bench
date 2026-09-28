@@ -57,6 +57,47 @@ def test_improving_session_passes_through_every_stage(world):
     assert state["inputs"]["builds"]["baseline"] and state["machine"]["host"]
 
 
+@pytest.mark.parametrize("ratio,audit,expected_gate", [
+    (0.97, "passed", "improved"),
+    (1.0, "passed", "closed"),
+    (0.97, "unresolved", "closed"),
+])
+def test_quality_saves_detailed_reports_before_decide(world, ratio, audit, expected_gate):
+    world.knobs.ratio, world.knobs.audit = ratio, audit
+    root, _ = compile_(world)
+    assert run_stage(root, "quality", progress=QUIET) == 0
+    saved = read_json(root / "stages/quality/report.json")
+    markdown = (root / "stages/quality/report.md").read_text()
+    assert not (root / "decision.json").exists()
+    assert not (root / "report.md").exists()
+    assert saved["format"] == "qtb-quality-report/1"
+    assert saved["gate"] == expected_gate
+    assert saved["quality_cap"] == 2.0
+    assert saved["gate_reason"] == read_state(root, "quality")["gate_reason"]
+    assert sum(saved["constraint_counts"].values()) == len(saved["constraints"])
+    assert saved["families"]
+    assert "run `decide` for the final benchmark verdict" in markdown
+    assert "## Quality tests" in markdown and "## Per-case changes" in markdown
+    if audit == "passed":
+        for metric in ("D2", "N2"):
+            assert saved["overall"][metric]["score"] == pytest.approx(ratio)
+            for family, values in saved["families"].items():
+                assert values[metric]["score"] == pytest.approx(ratio)
+                assert f"| family | {family} | {metric} |" in markdown
+        assert saved["trade_score"] == pytest.approx(ratio)
+        assert saved["overall"]["D2"]["cases"]
+    else:
+        assert saved["overall"]["D2"]["status"] == "unavailable"
+        assert saved["trade_score"] is None
+        assert all(v["D2"]["status"] == "unavailable" for v in saved["families"].values())
+        assert "audit/determinism" in markdown
+    # Deciding later uses the same estimators, without overwriting the stage snapshot.
+    before = file_hash(root / "stages/quality/report.json")
+    decision = verdict(root)[1]
+    assert decision["summaries"] == saved["summaries"]
+    assert file_hash(root / "stages/quality/report.json") == before
+
+
 def test_no_improvement_closes_the_gate_and_skips_the_rest(world):
     world.knobs.ratio = 1.0
     world.knobs.candidate_correct = False  # never seen: correctness does not run
@@ -606,7 +647,7 @@ def test_a_missing_store_entry_stops_later_stages(world):
 def test_version_five_policies_need_no_qualification():
     for profile in ("iterations-profile", "confirm-profile"):
         manifest, policy, _ = load_profile(profile, verify=False)
-        assert policy["version"] == manifest["version"] == 9
+        assert policy["version"] == manifest["version"] == 10
         assert "harness/qualification" not in policy["required_ids"]
         assert not any(i.endswith("1/upstream") for i in policy["required_ids"])
         assert "qualification" not in policy and "status" not in manifest
