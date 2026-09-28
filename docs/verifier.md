@@ -74,16 +74,16 @@ feed the [stage-coverage rule](metrics.md#7-change-scope-and-stage-coverage).
 
 | ID | What | Runs on | Where | Oracle |
 | --- | --- | --- | --- | --- |
-| C0 | Structure and legality | Every output of every case and seed | Coordinator (`metrics/`) | Pure Python |
+| C0 | Structure and legality | Every output of every case and seed | Harness check process (`metrics/`) | Pure Python |
 | C1 | Exact operator equivalence | Correctness suite, 1–6 qubits | Verifier (`small_exact.py`) | Dense `Operator` |
 | C2 | Layout, ancillas, measurements | Correctness suite on wider targets | Verifier (`layout_semantics.py`) | Statevectors |
 | C3 | Dynamic circuits | Correctness suite with control flow | Verifier (`dynamic.py`) | Exact branching simulator |
 | C4 | Symbolic parameters | Parameterized fixtures | Coordinator + C1 on bound circuits | — |
 | C5 | Scheduling validity | Scheduled fixtures | Verifier (`schedule.py`) | Pure Python timeline check |
 | API | Pass-manager contracts | Level-2 fixtures | Worker `api_checks` mode, judged by the coordinator | — |
-| C6 | Routing replay | Every scored and basis-guard seed; 10 seeds of other static guards | Coordinator (`metrics/replay.py`) | Pure Python, exact |
-| C7 | Clifford variants at full scale | 3 seeds (iterations) or 10 seeds (confirm) of the 100-qubit circuits' Clifford variants | Verifier (`small_exact.py`) | Stabilizer tableaux |
-| C1-lite | Zero-input state equivalence of scored outputs | Confirm profile: scored cases ≤ 25 qubits, first 10 seeds | Verifier (`layout_semantics.py`) | Statevectors / measurement branches |
+| C6 | Routing replay | Every scored and basis-guard seed; 10 seeds of other static guards | Harness check process (`metrics/replay.py`) | Pure Python, exact |
+| C7 | Clifford variants at full scale | `clifford_seeds` of the 100-qubit circuits' Clifford variants: 3 (iterations) or 5 (confirm) | Verifier (`small_exact.py`) | Stabilizer tableaux |
+| C1-lite | Zero-input state equivalence of scored outputs | Confirm profile: scored cases ≤ 25 qubits, first 10 seeds; required when the baseline's union width is at most 22 | Verifier (`layout_semantics.py`) | Statevectors / measurement branches |
 
 ### C0: structure (every output)
 
@@ -98,7 +98,10 @@ Computed in the same streaming pass as `D2`/`N2`:
   initial layout is honored.
 - The exported output hash matches what the worker reported.
 
-C0 catches illegal output, not wrong output.
+C0 catches illegal output, not wrong output. In the quality stage C0 runs in a pool of harness
+processes that never import Qiskit. A mismatch carries a witness: every failing operation
+with its position and a digest of the operation, which tells two failures with the same error
+text apart.
 
 ### C1: exact equivalence of small circuits
 
@@ -159,30 +162,49 @@ For level-2 fixtures, the worker runs live checks and the coordinator judges the
 ### C6: routing replay (on the scored circuits themselves)
 
 Full equivalence of a 100-qubit generic-angle circuit cannot be computed. What layout and
-routing do, however, can be checked exactly. The worker compiles the same seed twice more with
-truncated pipelines:
+routing do, however, can be checked exactly. The quality compile itself exports two snapshots
+of its own state (`tap:init` and `tap:routing` pipeline edits):
 
-- `L'`: the pipeline stopped after `init`, which is the virtual circuit the router receives.
-- `R`: the pipeline stopped after `routing`, which is the physical circuit with SWAPs.
+- `L'`: the circuit after `init` (after its `post_init` hook), which is the virtual circuit the
+  router receives.
+- `R`: the circuit after `routing` (after its `post_routing` hook), which is the physical
+  circuit with SWAPs, with its layout at that point.
+
+A tap is an analysis pass appended after the stage's existing post hook; it copies the DAG and
+exports the layout from the property set exactly as the pass manager does at the end of a run,
+so later passes cannot change what it captured. Taps are left out of the recorded pass-manager
+fingerprint (by their class, so a candidate's pass of the same name is not), and the
+determinism audit recompiles without them. A missing snapshot leaves C6 `unverified`; so does
+one that cannot be captured or exported, which never fails the compile or its output
+(`snapshot_errors` in the check names the reason).
 
 The replay walks `R` in order while tracking which virtual qubit sits on each physical qubit.
 Each operation must either be the next pending operation of `L'` on exactly those virtual
 qubits, or a SWAP that updates the mapping. At the end, every queue must be empty and the
 recorded final layout must match the tracked mapping, including any permutation that `init`
-elided. The full pipeline's layout must also equal the prefix's. At level 3 a difference is
+elided. At levels 0–2 the output's layout must also equal the routed snapshot's, also where
+routing itself cannot be replayed; a difference is a `mismatch`. At level 3 a difference is
 recorded and skipped, because optimization may legitimately re-apply a layout.
 
 A router that rewrites gates gives `unverified`. SWAPs that do not account for the final layout
-give `mismatch`. C6 covers the **layout** and **routing** stages only. It roughly doubles the
-compile cost of a quality run.
+give `mismatch`, with a witness: where the replay stopped (the position and operation, or the
+final mapping), the mapping at that point and a digest of the routed operations before it.
+C6 covers the **layout** and **routing** stages only.
+
+Before version 7 the snapshots were two separate prefix compiles of the same seed. Because
+VF2PostLayout breaks ties differently from run to run on targets without error rates, even
+with a fixed seed, a prefix could end with another layout than the full compile, and C6 failed
+on unmodified builds (design/updated_confirm_plan.md, section 3).
 
 ### C7: Clifford variants at scale
 
 Each 100-qubit scored circuit has a frozen **Clifford variant**: every rotation angle is
 replaced by a random odd multiple of π/2, which keeps the routing problem. Clifford circuits
 can be compared exactly at any width through their stabilizer tableaux. Each revision compiles
-the variant on 3 seeds in the iterations profile and 10 in the confirm profile: in the prefix
-mode below, and in the confirm profile also through the full pipeline.
+the variant on `clifford_seeds` seeds (3 in the iterations profile, 5 in the confirm profile),
+in the prefix mode below and, where `clifford_full_mode` is set (confirm), also through the full
+pipeline. Every case, mode and seed is its own worker job, verified as soon as it lands. A
+policy before version 7 has neither key and uses 3 and 10 seeds.
 C6 already replays layout and routing on every scored seed, so C7's own contribution is
 translation (and optimization, in full mode) at full width, which does not need many seeds:
 
@@ -197,15 +219,27 @@ translation (and optimization, in full mode) at full width, which does not need 
 ### C1-lite (confirm profile)
 
 This checks what the scored compilation actually promises: correct behavior when every
-qubit starts in `|0⟩`. Eligible cases are scored cases with at most 25 logical qubits and no free
-parameters, on the first 10 seeds. The verifier simulates the output and its laid-out reference
-on the union of wires that either circuit touches (never dropping a logical or ancilla wire):
+qubit starts in `|0⟩`. Candidates are scored cases with at most 25 logical qubits and no free
+parameters, on the first 10 seeds, whose output passed C0. The verifier simulates the output
+and its laid-out reference on the union of wires that either circuit touches (never dropping a
+logical or ancilla wire):
 
 - Unmeasured circuits: equal statevectors up to global phase.
 - Terminally measured circuits: equal joint classical distributions (TVD < 1e-8) and equal
   conditional residual states (joint trace distance < 1e-8), with an independent phase per
   outcome.
-- More than 25 wires, or a statevector budget above 1 GiB, gives `unverified`.
+- More wires than `max_qubits`, or a statevector budget above 1 GiB, gives `unverified`. The
+  harness passes the policy's `c1_lite_max_width` (22); the verifier's own default is 25.
+
+A pair (case, seed) is required when the baseline's union width is at most
+`c1_lite_max_width`; both outputs must then verify. A wider or missing evolved output, or a
+verifier timeout, leaves `CA1/C1-lite` unresolved; the pair never leaves the requirement, so a
+candidate cannot escape the check by widening an incorrect output. Baselines wider than the
+limit are excluded and counted (`baseline_width_exclusions`); evolved overruns are listed
+(`evolved_width_overruns`). A mismatch is always recorded, required pair or not. At 22 wires
+about 570 of the 630 candidate observations per revision remain; `ripple_adder_10` (22 qubits
+on the 5×5 grid) keeps about a quarter of its 40, and at 25 wires its checks ran into the
+verifier's 300-second timeout.
 
 Trotter inputs are compared against a frozen product-formula reference circuit, not the exact
 exponential. C1-lite covers **all stages** for the `all_zero` input domain.

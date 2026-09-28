@@ -49,6 +49,16 @@ def _zero_baseline_deltas(manifest, observations):
     return {"status": "reported", "cases": results}
 
 
+def _seed_label(summary):
+    """A panel's seeds per case: one count, or the range of a mixed-seed panel."""
+    counts = summary.get("seed_counts")
+    if isinstance(counts, dict) and counts.get("min") != counts.get("max"):
+        return f"{counts['min']}–{counts['max']} per case"
+    if isinstance(counts, dict):
+        return str(counts["max"])
+    return str(len(summary.get("seeds", [])))
+
+
 def make_decision(
     run,
     records,
@@ -205,14 +215,14 @@ def render_report(decision):
     lines += [
         "## Quality estimates",
         "",
-        "| Panel | Ratio | Paired SE (log) | Upper 2 SE |",
-        "| --- | ---: | ---: | ---: |",
+        "| Panel | Ratio | Paired SE (log) | Upper 2 SE | Seeds |",
+        "| --- | ---: | ---: | ---: | ---: |",
     ]
     for name, summary in decision["summaries"].items():
         if "score" in summary and name.startswith(("IA2/", "IA3/", "CA2/", "CA3/")):
             lines.append(
                 f"| {name} | {summary['score']:.6f} | {summary['SE']:.6f} | "
-                f"{summary['ln_score_plus_2SE']:.6f} |"
+                f"{summary['ln_score_plus_2SE']:.6f} | {_seed_label(summary)} |"
             )
     lines += [
         "",
@@ -232,10 +242,25 @@ def render_report(decision):
             lines.append(
                 f"| {dimension} | {value} | {metric} | {summary['score']:.6f} | "
                 f"{summary['SE']:.6f} | {len(summary.get('cases', {}))} | "
-                f"{len(summary.get('seeds', []))} |"
+                f"{_seed_label(summary)} |"
             )
         else:
             lines.append(f"| {dimension} | {value} | {metric} | unavailable | — | — | — |")
+    held_out = {
+        metric: decision["summaries"].get(name)
+        for metric, name in (("D2", "leave_iterations_out"), ("N2", "leave_iterations_out/N2"))
+    }
+    if any(held_out.values()):
+        lines += ["", "Score without the iterations profile's scored groups (report-only):"]
+        for metric, summary in held_out.items():
+            if summary and "score" in summary:
+                lines.append(
+                    f"- {metric} ratio {summary['score']:.6f} (paired SE {summary['SE']:.6f}; "
+                    f"cases: {len(summary.get('cases', {}))}; seeds: {_seed_label(summary)})."
+                )
+            else:
+                reason = (summary or {}).get("reason", "not computed")
+                lines.append(f"- {metric}: unavailable ({reason}).")
     bootstrap = decision["summaries"].get("instance_bootstrap")
     if bootstrap:
         lines += [

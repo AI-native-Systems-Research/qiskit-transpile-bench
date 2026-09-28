@@ -36,7 +36,9 @@ def test_c7_mutations_propagate_to_verdict(tmp_path, mutation, expected_status, 
     comparison = SimpleNamespace(
         directory=tmp_path,
         prefix="IA",
-        jobs=lambda specs: [job(*spec) for spec in specs],
+        policy={},
+        workers=2,
+        job=job,
         verify_many=lambda requests: [
             verify_clifford(
                 reference, corrupted if output["corrupted"] else reference.copy(), None

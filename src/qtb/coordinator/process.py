@@ -46,7 +46,28 @@ def _await_exit(process):
         process.wait()
 
 
-def run_worker(build, job, directory, hash_seed="0", hooks=None):
+# Compile modes whose interrupted seed is retried once in a fresh process. Cost modes never
+# are: their processes are the monitored measurement, and a failed entry ends the panel.
+RETRIED_MODES = {"quality", "prefix", "diagnostics"}
+
+
+def load_per_cpu():
+    try:
+        return os.getloadavg()[0] / (os.cpu_count() or 1)
+    except OSError:
+        return None
+
+
+def run_worker(build, job, directory, hash_seed="0", hooks=None, retry_timeout=True):
+    """Run one worker job; returns one result row per requested seed, in order.
+
+    A seed whose compile exceeds the heartbeat timeout is killed. In a compile mode
+    (``RETRIED_MODES``, never under ``hooks``) that seed is then compiled once more alone in
+    a fresh process: a second timeout leaves it an error with ``timeouts: 2``, a success
+    keeps the retried result with ``timeout_retries: 1``. Either way the seed's row records
+    each attempt's timeout and host load per CPU, which ``quality`` needs to classify a
+    candidate timeout. The later seeds of the batch run in another fresh process.
+    """
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     # The full source inventory belongs to run/build metadata, not every seed
@@ -74,7 +95,7 @@ def run_worker(build, job, directory, hash_seed="0", hooks=None):
         str(result_dir),
     ]
     timeout, last, completed = job["timeout_s"], time.monotonic(), 0
-    timed_out, abort = False, None
+    timed_out, abort, load = False, None, None
     with ExitStack() as stack:
         log = stack.enter_context((directory / "worker.log").open("wb"))
         environment = {"PYTHONHASHSEED": hash_seed, "PYTHONDONTWRITEBYTECODE": "1"}
@@ -111,7 +132,7 @@ def run_worker(build, job, directory, hash_seed="0", hooks=None):
                         os.killpg(process.pid, signal.SIGKILL)
                         break
                 if time.monotonic() - last > timeout:
-                    timed_out = True
+                    timed_out, load = True, load_per_cpu()
                     os.killpg(process.pid, signal.SIGKILL)
                     break
                 if observer is None:
@@ -158,17 +179,34 @@ def run_worker(build, job, directory, hash_seed="0", hooks=None):
         reason = "Worker timed out" if timed_out else "Worker exited before completing the batch"
         if log_tail:
             reason += f": {log_tail}"
-        results.append(
-            {
-                "protocol": PROTOCOL,
-                "status": "error",
-                "mode": job["mode"],
-                "seed": pending[0],
-                "error": reason,
-                "returncode": process.returncode,
-                "log": str(log_path),
-            }
-        )
+        failure = {
+            "protocol": PROTOCOL,
+            "status": "error",
+            "mode": job["mode"],
+            "seed": pending[0],
+            "error": reason,
+            "returncode": process.returncode,
+            "log": str(log_path),
+        }
+        if timed_out:
+            attempt = {"timeout_s": timeout, "load_per_cpu": load, "log": str(log_path)}
+            failure.update(timed_out=True, timeouts=1, attempts=[attempt])
+            if retry_timeout and hooks is None and job["mode"] in RETRIED_MODES:
+                # One fresh process for the interrupted seed alone, without a further retry.
+                retried = run_worker(
+                    build,
+                    dict(job, seeds=[pending[0]]),
+                    directory / f"again-{pending[0]}",
+                    hash_seed,
+                    retry_timeout=False,
+                )[0]
+                if retried["status"] == "ok":
+                    failure = dict(retried, timeout_retries=1, attempts=[attempt])
+                elif retried.get("timed_out"):
+                    failure.update(timeouts=2, attempts=[attempt, *retried["attempts"]])
+                else:
+                    failure = dict(retried, timeouts=1, attempts=[attempt])
+        results.append(failure)
         if timed_out and len(pending) > 1:
             # The first missing seed was interrupted. Run the later seeds in a
             # fresh process so one slow compile cannot discard the rest.

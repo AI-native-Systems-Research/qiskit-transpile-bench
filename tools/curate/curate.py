@@ -76,7 +76,74 @@ def load_probe(source):
     return module
 
 
-def policy(profile):
+# Version 7 (design/updated_confirm_plan.md). Confirm-timing keeps one large end-to-end case
+# per family; the companion panel times the scored level-2 case of four cheaper families.
+CONFIRM_TIMING = [
+    ("qft_n100", 3),
+    ("square_heisenberg_n100", 0),
+    ("qaoa_ba_n100_3reps", 3),
+    ("qv_n50_d50", 2),
+    ("multiplier_h18_n32", 0),
+    ("bv_all_ones_n100", 3),
+    ("queko_bss_53", 2),
+    ("su2_circular_n89", 0),
+]
+COMPANION_GROUPS = [
+    "square_heisenberg_n100",
+    "multiplier_h18_n32",
+    "bv_all_ones_n100",
+    "queko_bss_53",
+]
+# Quality batches of about this many seconds of cluster work (plan section 4.1, Q3).
+TARGET_BATCH_S = 60
+DEFAULT_SEED_S = 0.5
+
+
+def seed_seconds(row, level):
+    """Estimated cluster seconds per quality seed from a catalog row's baseline probe.
+
+    The section 4.3 model without the two routing-prefix compiles that Q1 removed: a fixed
+    0.36 s, 1.4e-4 s per N2 gate for the checks, and 1.25 times the M1 compile time.
+    """
+    probe = (row.get("baseline_probe") or {}).get(str(level))
+    if not probe:
+        return None
+    n2 = sum(probe["N2"]) / len(probe["N2"])
+    return round(0.36 + 1.4e-4 * n2 + 1.25 * probe["t"], 3)
+
+
+def quality_batch_schedule(cases, catalog):
+    """The frozen per-case batch schedule: estimated seconds per seed of each quality case.
+
+    Cases without a probe row (the generated replacements) use ``DEFAULT_SEED_S``. The cx
+    and ecr twins use their cz row, which compiles the same circuit.
+    """
+    rows = {}
+    for row in catalog:
+        if row["input_group"] in REPLACEMENTS or row.get("replaces"):
+            continue  # the probe timed the replaced circuit, not its replacement
+        rows[row["input_group"], row["target_id"], row["probe_id"].endswith("_sabre")] = row
+    estimates = {}
+    for case in cases:
+        if case["role"] in {"timing", "memory"}:
+            continue
+        target = case["target"]["file"].split("/")[-1].removesuffix(".target.json")
+        sabre = case["variant"] == "sabre_methods"
+        row = rows.get((case["input_group"], target, sabre)) or rows.get(
+            (case["input_group"], target.replace("_cx", "_cz").replace("_ecr", "_cz"), sabre)
+        )
+        value = seed_seconds(row or {}, case["optimization_level"])
+        if value is not None and value != DEFAULT_SEED_S:
+            estimates[case["case_id"]] = value
+    return {
+        "version": 1,
+        "target_batch_s": TARGET_BATCH_S,
+        "default_seed_s": DEFAULT_SEED_S,
+        "seed_s": dict(sorted(estimates.items())),
+    }
+
+
+def policy(profile, cases=(), catalog=()):
     prefix = "CA" if profile == "confirm-profile" else "IA"
     required = [
         "harness/roundtrip",
@@ -93,10 +160,23 @@ def policy(profile):
     ]
     if prefix == "CA":
         required += ["CA3/breadth", "CA1/C1-lite", "CA5/confirm-timing", "CA5/memory"]
+    confirm = prefix == "CA"
+    extra_protocol = {}
+    if confirm:
+        extra_protocol = dict(
+            quality_batch_schedule=quality_batch_schedule(cases, catalog),
+            # Baseline union width that requires a C1-lite pair; also the verifier limit.
+            c1_lite_max_width=22,
+            companion_groups=COMPANION_GROUPS,
+        )
     return dict(
         format="qtb-policy/1",
         profile=profile,
-        version=6,
+        version=7,
+        # C7: seeds per variant and mode, and whether full-pipeline outputs are checked too.
+        clifford_seeds=5 if confirm else 3,
+        clifford_full_mode=confirm,
+        quality_cap_rule="plain",
         required_ids=required,
         quality_prerequisites=["harness/roundtrip", "audit/determinism"],
         practical_ratio=0.99 if prefix == "CA" else 1.0,
@@ -115,13 +195,17 @@ def policy(profile):
             warmups=1,
             minimum_calls=2,
             minimum_ns=1000000000,
-            companion_seeds=list(range(20)),
+            companion_seeds=list(range(10 if confirm else 20)),
             companion_rounds=3,
-            memory_processes=5,
+            memory_processes=3 if confirm else 5,
             rerun_multiplier=2,
             audit_fraction=0.05,
             audit_minimum=10,
             output_retention_bytes=8 * 1024 * 1024,
+            # A candidate timeout fails only when repeated, with the baseline seed well
+            # inside the timeout and a quiet host; otherwise it is unresolved.
+            quality_timeout=dict(baseline_fraction=0.5, max_load_per_cpu=1.0),
+            **extra_protocol,
         ),
         # Fixed cost guards; there is no per-machine calibration. See
         # design/remove-calibration-plan.md for how to sanity-check them on a runner.
@@ -133,6 +217,7 @@ def policy(profile):
             screen_fraction=0.5,
         ),
         tolerances=dict(operator_rtol=1e-7, operator_atol=1e-8, state_atol=1e-8),
+        upstream_test_budgets_s=dict(python=14400, rust=10800),
     )
 
 
@@ -415,25 +500,19 @@ def curate(source, root=ROOT):
                 "queko_bss_53",
                 "su2_circular_n89",
             ]
-            # Level 1 sits between levels 0 and 2 (T4 and T8 still time it), and
-            # the three iterations circuits are already timed at level 2 by T11,
-            # T14 and T17.
-            for name in heavy:
+            # One large end-to-end case per family (version 7; version 6 timed 20).
+            for name, level in CONFIRM_TIMING:
                 template = next(
                     c for c in cases if c["input_group"] == name and c["role"] == "scored"
                 )
-                levels = [0, 2] if name == "su2_circular_n89" else [0, 2, 3]
-                if name in ITERATIONS:
-                    levels.remove(2)
-                for level in levels:
-                    cases.append(
-                        timed(
-                            dict(template, optimization_level=level),
-                            f"confirm-timing/{name}/L{level}",
-                            0,
-                            panel="confirm-timing",
-                        )
+                cases.append(
+                    timed(
+                        dict(template, optimization_level=level),
+                        f"confirm-timing/{name}/L{level}",
+                        0,
+                        panel="confirm-timing",
                     )
+                )
             for name in heavy + ["multiplier_h18_n20"]:
                 template = next(
                     c for c in cases if c["input_group"] == name and c["optimization_level"] == 2
@@ -455,7 +534,7 @@ def curate(source, root=ROOT):
         manifest = dict(
             format="qtb-manifest/1",
             profile=profile,
-            version=6,
+            version=7,
             cases=cases,
             coverage_gaps=[
                 "No line target in upstream suite",
@@ -472,7 +551,7 @@ def curate(source, root=ROOT):
         directory = root / "profiles" / profile
         directory.mkdir(parents=True, exist_ok=True)
         write_json(directory / "manifest.json", manifest)
-        write_json(directory / "policy.json", policy(profile))
+        write_json(directory / "policy.json", policy(profile, cases, catalog))
     write_json(fixtures / "provenance.json", provenance)
     shutil.copy2(source / "LICENSE.txt", fixtures / "LICENSE-QISKIT.txt")
     lines = [
@@ -495,9 +574,88 @@ def curate(source, root=ROOT):
     (fixtures / "PROVENANCE.md").write_text("\n".join(lines) + "\n")
 
 
+def reprofile(root=ROOT):
+    """Apply the version-7 profile changes to the shipped version-6 profiles.
+
+    For a checkout without the archived Qiskit tree: the fixtures are unchanged, so the
+    cases ``curate`` would produce differ from version 6 only by these edits. It rewrites
+    both profiles' policies and applies to the confirm manifest the role and seed changes
+    of ``catalog.json`` (W2), the one-per-family confirm-timing panel and the recomputed
+    scored weights. It refuses a manifest that is not version 6 or 7.
+    """
+    catalog = json.loads((ROOT / "tools/curate/catalog.json").read_text())
+    for profile in ("iterations-profile", "confirm-profile"):
+        directory = root / "profiles" / profile
+        manifest = json.loads((directory / "manifest.json").read_text())
+        if manifest["version"] not in {6, 7}:
+            raise RuntimeError(f"{profile} is version {manifest['version']}, not 6 or 7")
+        cases = manifest["cases"]
+        if profile == "confirm-profile":
+            names = {
+                row["input_group"]: REPLACEMENTS.get(row["input_group"], (row["input_group"],))[0]
+                for row in catalog
+            }
+            plan = {}
+            for row in catalog:
+                sabre = row["probe_id"].endswith("_sabre")
+                for level, role in row["roles"].items():
+                    plan[names[row["input_group"]], row["target_id"], sabre, int(level)] = (
+                        role,
+                        row["seeds"].get(level, 100),
+                    )
+            for case in cases:
+                if case["case_id"].startswith("confirm/") and case["role"] not in {
+                    "timing", "memory"
+                }:
+                    target = case["target"]["file"].split("/")[-1].removesuffix(".target.json")
+                    sabre = case["variant"] == "sabre_methods"
+                    key = case["input_group"], target, sabre, case["optimization_level"]
+                    if key in plan:
+                        case["role"], case["seeds_per_block"] = plan[key]
+            timing = {f"confirm-timing/{name}/L{level}" for name, level in CONFIRM_TIMING}
+            cases[:] = [
+                c
+                for c in cases
+                if c.get("panel") != "confirm-timing" or c["case_id"] in timing
+            ]
+            missing = timing - {c["case_id"] for c in cases}
+            if missing:
+                raise RuntimeError(f"Confirm-timing cases missing: {sorted(missing)}")
+            for case in cases:
+                if case["role"] == "memory":
+                    # curate copies a memory case from the group's first level-2 case.
+                    template = next(
+                        c
+                        for c in cases
+                        if c["input_group"] == case["input_group"]
+                        and c["optimization_level"] == 2
+                        and c["role"] not in {"timing", "memory"}
+                    )
+                    case["seeds_per_block"] = template["seeds_per_block"]
+                if case["role"] != "scored":
+                    case["weight"] = 0.0
+            weights = hierarchical_weights([c for c in cases if c["role"] == "scored"])
+            for case in cases:
+                if case["role"] == "scored":
+                    case["weight"] = weights[case["case_id"]]
+        manifest["version"] = 7
+        write_json(directory / "manifest.json", manifest)
+        write_json(directory / "policy.json", policy(profile, cases, catalog))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--source", type=Path)
     parser.add_argument("--output", type=Path, default=ROOT)
+    parser.add_argument(
+        "--reprofile",
+        action="store_true",
+        help="apply the version-7 changes to the shipped profiles (no source tree needed)",
+    )
     args = parser.parse_args()
-    curate(args.source.resolve(), args.output.resolve())
+    if args.reprofile:
+        reprofile(args.output.resolve())
+    elif args.source is None:
+        parser.error("--source is required unless --reprofile")
+    else:
+        curate(args.source.resolve(), args.output.resolve())

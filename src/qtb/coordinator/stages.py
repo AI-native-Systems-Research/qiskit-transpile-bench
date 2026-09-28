@@ -157,6 +157,9 @@ def compile_body(comparison):
 
 
 def quality_body(comparison):
+    # Every quality record is derived again from the rows, which a retry completes from the
+    # checkpoints: no record of the attempt it resumes stands in for them.
+    comparison.reset_evidence()
     cases = quality_cases(comparison.manifest)
     with step(comparison, "Quality (C0 + C6 routing replay)"):
         rows = comparison.quality(cases)
@@ -198,7 +201,7 @@ def quality_body(comparison):
 
 def baseline_correctness_key(run, policy, machine, verifier_identity, fixtures):
     """Store key of the baseline correctness half, or ``None`` when it must be recomputed."""
-    from qtb.coordinator.checks import CLIFFORD_FULL_MODE, CLIFFORD_SEEDS
+    from qtb.coordinator.checks import clifford_settings
 
     if not run.get("store") or same_build(run.get("builds", {})):
         return None
@@ -214,7 +217,7 @@ def baseline_correctness_key(run, policy, machine, verifier_identity, fixtures):
             "verifier": verifier_identity,
             "machine_cpu": machine.get("cpu"),
             "worker_environment": SERIAL,
-            "clifford": [CLIFFORD_SEEDS[prefix], CLIFFORD_FULL_MODE[prefix]],
+            "clifford": list(clifford_settings(policy, prefix)),
             "tolerances": policy.get("tolerances"),
         }
     )

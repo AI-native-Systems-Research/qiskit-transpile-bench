@@ -1860,15 +1860,15 @@
     "source": "test/benchmarks/transpiler_qualitative.py",
     "roles": {
       "0": "scored",
-      "1": "scored",
-      "2": "scored",
-      "3": "scored"
+      "1": "deterministic",
+      "2": "deterministic",
+      "3": "deterministic"
     },
     "seeds": {
       "0": 100,
-      "1": 100,
-      "2": 100,
-      "3": 100
+      "1": 10,
+      "2": 10,
+      "3": 10
     },
     "logical_qubits": 16,
     "active_qubits": 5,
@@ -2654,7 +2654,7 @@
       "2": "guard"
     },
     "seeds": {
-      "2": 20
+      "2": 100
     },
     "logical_qubits": 20,
     "active_qubits": 20,

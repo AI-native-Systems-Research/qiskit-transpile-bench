@@ -9,6 +9,7 @@ import pytest
 
 from qtb.canonical import digest, file_hash, read_json, write_json
 from qtb.coordinator import Comparison
+from qtb.coordinator.quality import InlineExecutor
 from qtb.coordinator.storage import quality_entry_valid
 from qtb.coordinator.store import Store, build_key, resolve_store
 from qtb.errors import HarnessError, Usage
@@ -287,15 +288,35 @@ def test_a_failed_audit_invalidates_the_stored_baseline_quality(tmp_path):
         "hashes": {"implementation": "i"},
     }
     comparison.progress = lambda *_: None
-    case = {"case_id": "c", "options": {}}
+    comparison.fixtures = tmp_path / "fixtures"
+    comparison.check_pool = lambda _workers: InlineExecutor()
+    case = {"case_id": "c", "options": {}, "target": {"file": "target.json"}}
     rows = [
-        {"case_id": "c", "revision": revision, "seed": 0, "seed_block": "B0",
-         "output_hash": "h", "layout": None}
+        {"id": revision, "case_id": "c", "revision": revision, "seed": 0, "seed_block": "B0",
+         "output_hash": "h", "layout": None, "checks": [], "worker": {}}
         for revision in ("baseline", "evolved")
     ]
     entry = store.quality_dir(comparison.baseline_quality_key(case))
     entry.mkdir(parents=True)
-    comparison.jobs = lambda specs: [[{"status": "ok", "output_hash": "other"}] for _ in specs]
+    audited = []
+
+    def job(revision, _case, mode, seeds, edits, hash_seed, options):
+        audited.append((revision, mode, list(edits), hash_seed, options))
+        return [{"seed": seed, "status": "ok", "output_hash": "other"} for seed in seeds]
+
+    comparison.job = job
     comparison.audit([case], rows)
-    assert comparison.records[-1]["result"] == "unresolved"
+    record = comparison.records[-1]
+    assert record["result"] == "unresolved"
+    # The first difference is named: case, seed, hash seed and field.
+    assert record["first_difference"]["case_id"] == "c"
+    assert record["first_difference"]["field"] == "output_hash"
+    assert record["first_difference"]["hash_seed"] in {"0", "1"}
     assert not quality_entry_valid(entry)
+    # Untapped recompiles that record their trace and boundaries through a callback.
+    assert all(
+        mode == "quality" and edits == []
+        and options == {"trace": True, "capture": ["init", "routing"]}
+        for _, mode, edits, _, options in audited
+    )
+    assert len(list((comparison.directory / "stages/quality/audit").glob("*.json"))) == 2

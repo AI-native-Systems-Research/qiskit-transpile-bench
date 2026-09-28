@@ -202,9 +202,56 @@ def test_worker_batch_records_every_seed_after_interruption(tmp_path, failure):
     if failure == "timeout":
         assert Path(rows[2]["job_file"]).parent.name == "retry-2"
         assert not rows[2].get("not_attempted")
+        # The interrupted seed was retried once, alone, in a fresh process.
+        assert rows[1]["timed_out"] and rows[1]["timeouts"] == 2
+        assert len(rows[1]["attempts"]) == 2
+        assert all(a["timeout_s"] == 2 for a in rows[1]["attempts"])
+        assert (tmp_path / "batch" / "again-1").is_dir()
     else:
         assert all(row["not_attempted"] for row in rows[2:])
         assert "fatal startup" in rows[1]["error"]
+
+
+def test_interrupted_seed_that_finishes_on_retry_keeps_its_result(tmp_path):
+    manifest, _, _ = load_profile("iterations-profile")
+    case = next(c for c in manifest["cases"] if c["case_id"] == "T1")
+    marker = tmp_path / "slow-once"
+    fake_python = tmp_path / "fake-worker"
+    fake_python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys, time\n"
+        "args = sys.argv\n"
+        "job = json.loads(pathlib.Path(args[args.index('--job') + 1]).read_text())\n"
+        "out = pathlib.Path(args[args.index('--out') + 1]) / 'results.jsonl'\n"
+        f"marker = pathlib.Path({str(marker)!r})\n"
+        "for seed in job['seeds']:\n"
+        "    if seed == 1 and not marker.exists():\n"
+        "        marker.write_text('slow')\n"
+        "        time.sleep(8)\n"
+        "    with out.open('a') as stream:\n"
+        "        stream.write(json.dumps({'protocol': job['protocol'], 'status': 'ok', "
+        "'mode': job['mode'], 'seed': seed}) + '\\n')\n"
+    )
+    fake_python.chmod(0o755)
+    job = dict(
+        mode="quality",
+        case=case,
+        seeds=[0, 1, 2],
+        fixture_root=str(data_root() / "fixtures"),
+        timeout_s=2,
+    )
+    rows = run_worker(dict(local_build(), python=str(fake_python)), job, tmp_path / "batch")
+    assert [row["status"] for row in rows] == ["ok", "ok", "ok"]
+    assert rows[1]["timeout_retries"] == 1 and len(rows[1]["attempts"]) == 1
+    assert Path(rows[1]["job_file"]).parent.name == "again-1"
+    # Cost modes are never retried: the failed entry ends the panel.
+    marker.unlink()
+    rows = run_worker(
+        dict(local_build(), python=str(fake_python)),
+        dict(job, mode="timing_e2e"),
+        tmp_path / "cost",
+    )
+    assert rows[1]["status"] == "error" and rows[1]["timeouts"] == 1
 
 
 def test_unknown_protocol_rejected():
@@ -492,12 +539,10 @@ def test_quality_cache_keeps_c6_job_provenance_without_large_prefix_files(tmp_pa
     assert observation["checks"][0]["prefix_outputs"][0]["output"] == str(prefix_output)
 
 
-def test_unattempted_quality_seed_is_unresolved(tmp_path):
+def _quality_comparison(tmp_path, policy, builds):
     from qtb.coordinator import Comparison
+    from qtb.coordinator.quality import InlineExecutor
 
-    manifest, policy, _ = load_profile("iterations-profile")
-    case = dict(next(c for c in manifest["cases"] if c["case_id"] == "T1"))
-    case["seeds_per_block"] = 2
     comparison = Comparison.__new__(Comparison)
     comparison.directory = tmp_path / "run"
     comparison.directory.mkdir()
@@ -505,15 +550,20 @@ def test_unattempted_quality_seed_is_unresolved(tmp_path):
     comparison.store = None
     comparison.machine = {}
     comparison.fixtures = data_root() / "fixtures"
-    comparison.run = {
-        "builds": {"evolved": {"id": "build"}},
-        "machine": {},
-        "hashes": {"implementation": "h"},
-    }
+    comparison.run = {"builds": builds, "machine": {}, "hashes": {"implementation": "h"}}
     comparison.policy = policy
     comparison.records = []
     comparison.progress = lambda *_: None
-    comparison.job = lambda *_: [
+    comparison.check_pool = lambda _workers: InlineExecutor()
+    return comparison
+
+
+def test_unattempted_quality_seed_is_unresolved(tmp_path):
+    manifest, policy, _ = load_profile("iterations-profile")
+    case = dict(next(c for c in manifest["cases"] if c["case_id"] == "T1"))
+    case["seeds_per_block"] = 2
+    comparison = _quality_comparison(tmp_path, policy, {"evolved": {"id": "build"}})
+    comparison.job = lambda *_args, **_kwargs: [
         {"seed": 0, "status": "error", "error": "Worker timed out"},
         {"seed": 1, "status": "error", "not_attempted": True, "error": "Not attempted"},
     ]
@@ -521,16 +571,72 @@ def test_unattempted_quality_seed_is_unresolved(tmp_path):
     assert [record["result"] for record in comparison.records] == ["failed", "unresolved"]
 
 
-def test_batched_routing_prefixes_preserve_per_seed_checks(tmp_path):
-    from qtb.canonical import read_json
-    from qtb.coordinator import Comparison
+def _timeout_row(seed, timeouts, load=0.1):
+    attempts = [{"timeout_s": 120, "load_per_cpu": load}] * timeouts
+    return {
+        "seed": seed, "status": "error", "error": "Worker timed out", "timed_out": True,
+        "timeouts": timeouts, "attempts": attempts,
+    }
 
-    comparison = Comparison.__new__(Comparison)
-    comparison.directory = tmp_path / "session"
-    comparison.fixtures = data_root() / "fixtures"
-    comparison.progress = lambda *_: None
-    comparison.run = {"builds": {"baseline": local_build()}}
-    case = next(
+
+@pytest.mark.parametrize(
+    "timeouts, baseline_ns, load, rule, expected",
+    [
+        # Repeated, the baseline finishes with a wide margin, quiet host: a real failure.
+        (2, 10 * 10**9, 0.1, True, "failed"),
+        # A single timeout (the retry did not time out but failed otherwise) is not enough.
+        (1, 10 * 10**9, 0.1, True, "unresolved"),
+        # The baseline itself is close to the timeout.
+        (2, 100 * 10**9, 0.1, True, "unresolved"),
+        # A loaded host.
+        (2, 10 * 10**9, 3.0, True, "unresolved"),
+        # A policy before version 7 keeps the old rule.
+        (1, 100 * 10**9, 3.0, False, "failed"),
+    ],
+)
+def test_candidate_timeouts_fail_only_when_repeated_with_baseline_margin(
+    tmp_path, timeouts, baseline_ns, load, rule, expected
+):
+    manifest, policy, _ = load_profile("iterations-profile")
+    case = dict(next(c for c in manifest["cases"] if c["case_id"] == "T1"))
+    case["seeds_per_block"] = 1
+    policy = dict(policy, measurement_protocol=dict(policy["measurement_protocol"]))
+    policy["measurement_protocol"].pop("quality_timeout", None)
+    if rule:
+        policy["measurement_protocol"]["quality_timeout"] = {
+            "baseline_fraction": 0.5, "max_load_per_cpu": 1.0,
+        }
+    comparison = _quality_comparison(
+        tmp_path, policy, {"baseline": {"id": "base"}, "evolved": {"id": "idea"}}
+    )
+    output = tmp_path / "out.gz"
+    output.write_bytes(b"x")
+
+    def job(revision, _case, _mode, seeds, *_args, **_kwargs):
+        if revision == "evolved":
+            return [_timeout_row(0, timeouts, load)]
+        return [{"seed": 0, "status": "ok", "compile_ns": baseline_ns, "output": str(output),
+                 "output_hash": "h", "layout": None}]
+
+    comparison.job = job
+    import qtb.coordinator.quality as quality
+
+    original = quality.structural_result
+    quality.structural_result = lambda *_: {"status": "verified", "output_hash": "h"}
+    try:
+        comparison.quality([case])
+    finally:
+        quality.structural_result = original
+    (failure,) = [r for r in comparison.records if r["id"].startswith("failure/")]
+    assert failure["subject"] == "evolved"
+    assert failure["result"] == expected
+    assert failure["baseline_compile_ns"] == baseline_ns
+
+
+def _c1_n3_case():
+    from qtb.canonical import read_json
+
+    return next(
         c
         for c in read_json(data_root() / "fixtures/correctness-suite.json")["cases"]
         if c["input_group"] == "c1_n3"
@@ -538,25 +644,77 @@ def test_batched_routing_prefixes_preserve_per_seed_checks(tmp_path):
         and c["target"]["file"].endswith("5_cx.target.json")
         and c["options"]["initial_layout"] is None
     )
-    case = dict(case, role="scored")
-    prefixes = comparison.routing_batch("baseline", case, [0, 1])
-    assert set(prefixes) == {0, 1}
-    assert prefixes[0][0]["job_file"] == prefixes[1][0]["job_file"]
-    outputs = comparison.job("baseline", case, "quality", [0, 1])
-    for result in outputs:
-        assert result["status"] == "ok"
-        observation = dict(
-            seed=result["seed"],
-            layout=result["layout"],
-            checks=[],
-            reference_hash=case["circuit"]["sha256"],
+
+
+def test_c6_replays_the_snapshots_of_the_same_compile(tmp_path):
+    from qtb.config import STAGES
+    from qtb.coordinator import Comparison
+    from qtb.coordinator.quality import TAP_EDITS, check_batch, routing_check
+
+    comparison = Comparison.__new__(Comparison)
+    comparison.directory = tmp_path / "session"
+    comparison.fixtures = data_root() / "fixtures"
+    comparison.run = {"builds": {"baseline": local_build()}}
+    case = dict(_c1_n3_case(), role="scored")
+    outputs = comparison.job(
+        "baseline", case, "quality", [0, 1], TAP_EDITS, options={"trace": True}
+    )
+    prefixes = {
+        stage: comparison.job(
+            "baseline", case, "prefix", [0, 1], [f"drop_stage:{s}" for s in STAGES[drop:]]
         )
-        comparison.check_routing("baseline", case, observation, prefixes)
-        assert observation["checks"][0]["status"] == "verified", observation
+        for stage, drop in (("init", 1), ("routing", 3))
+    }
+    for result in outputs:
+        assert result["status"] == "ok", result
+        assert set(result["snapshots"]) == {"init", "routing"}
+        assert result["trace"] and all(len(entry) == 4 for entry in result["trace"])
+        # The snapshots are what the former prefix jobs exported (a deterministic case).
+        for stage, rows in prefixes.items():
+            prefix = rows[result["seed"]]
+            snapshot = result["snapshots"][stage]
+            assert (snapshot["output_hash"], snapshot["layout"]) == (
+                prefix["output_hash"], prefix["layout"],
+            )
+        check = routing_check(case, result["layout"], result["snapshots"], "reference")
+        assert check["status"] == "verified", check
+        assert check["layout_equality"] == "matched"
+    checked = check_batch(
+        {
+            "case": case,
+            "case_hash": "h",
+            "target_path": str(data_root() / "fixtures" / case["target"]["file"]),
+            "revision": "baseline",
+            "build_id": "a" * 64,
+            "rows": outputs,
+            "c1_lite": None,
+        }
+    )
+    assert [[c["oracle"] for c in o["checks"]] for o in checked["observations"]] == [
+        ["C0", "C6"], ["C0", "C6"],
+    ]
+    snapshots = checked["observations"][0]["checks"][1]["snapshots"]
+    assert [s["stage"] for s in snapshots] == ["init", "routing"]
+    assert all(s["job_file"] == outputs[0]["job_file"] for s in snapshots)
 
 
-def test_routing_replay_scope_limits_case_guards():
-    from qtb.coordinator import Comparison, routing_replay_seeds
+def test_missing_snapshot_leaves_c6_unverified():
+    from qtb.coordinator.quality import routing_check
+
+    case = {"role": "scored", "optimization_level": 1, "input_domain": "all_zero"}
+    check = routing_check(case, None, {"init": {"output": "x"}}, "reference")
+    assert check["status"] == "unverified"
+    assert check["detail"] == "Missing stage-boundary snapshot"
+    assert "snapshot_errors" not in check
+    # The worker says why a snapshot is missing.
+    errors = {"routing": "Unsupported: No typed constructor for Isometry (isometry)"}
+    check = routing_check(case, None, {"init": {"output": "x"}}, "reference", errors)
+    assert check["status"] == "unverified"
+    assert check["snapshot_errors"] == errors
+
+
+def test_routing_replay_scope_limits_case_guards(monkeypatch):
+    from qtb.coordinator import quality, routing_replay_seeds
 
     seeds = list(range(25))
     scored = {"role": "scored"}
@@ -568,42 +726,103 @@ def test_routing_replay_scope_limits_case_guards():
     assert routing_replay_seeds(case_guard, seeds) == list(range(10))
     assert routing_replay_seeds(canary, seeds) == []
 
-    comparison = Comparison.__new__(Comparison)
-    comparison.job = lambda *_: pytest.fail("Canaries must not launch C6 prefix jobs")
-    assert comparison.routing_batch("baseline", canary, [0, 1]) == {}
-    observation = {"seed": 0, "seed_block": "B0", "checks": []}
-    comparison.check_routing("baseline", canary, observation, {})
-    assert observation["checks"] == []
+    monkeypatch.setattr(
+        quality, "structural_result", lambda *_: {"status": "verified", "output_hash": "h"}
+    )
+    monkeypatch.setattr(
+        quality, "routing_check", lambda *_: pytest.fail("Canaries must not replay routing")
+    )
+    monkeypatch.setattr(quality, "read_json", lambda _path: {})
+    canary = dict(
+        _c1_n3_case(), role="canary", case_id="canary", semantic_reference={"kind": "input"}
+    )
+    checked = quality.check_batch(
+        {
+            "case": canary, "case_hash": "h", "target_path": "t", "revision": "baseline",
+            "build_id": "b", "c1_lite": 22,
+            "rows": [{"seed": 0, "status": "ok", "output": "o", "output_hash": "h",
+                      "layout": None}],
+        }
+    )
+    assert [c["oracle"] for c in checked["observations"][0]["checks"]] == ["C0"]
 
 
-@pytest.mark.parametrize("level, expected", [(3, "skipped"), (2, "mismatch")])
-def test_routing_records_full_layout_disagreement(monkeypatch, level, expected):
-    import qtb.coordinator as coordinator
+@pytest.mark.parametrize(
+    "level, replayed, expected",
+    [
+        (3, "verified", "skipped"),
+        (2, "verified", "mismatch"),
+        # The layouts must agree at levels 0-2 also where routing cannot be replayed.
+        (2, "unverified", "mismatch"),
+    ],
+)
+def test_routing_records_full_layout_disagreement(monkeypatch, level, replayed, expected):
+    from qtb.coordinator import quality
 
-    monkeypatch.setattr(coordinator, "read_circuit", lambda *_: ({"num_qubits": 2}, []))
-    monkeypatch.setattr(coordinator, "replay", lambda *_: {"status": "verified"})
+    monkeypatch.setattr(quality, "read_circuit", lambda *_: ({"num_qubits": 2}, []))
+    monkeypatch.setattr(quality, "replay", lambda *_: {"status": replayed})
     full = {"initial_index_layout": [0, 1], "final_index_layout": [1, 0]}
-    prefix = {"initial_index_layout": [0, 1], "final_index_layout": [0, 1]}
-    rows = (
-        {"status": "ok", "output": "initial", "layout": prefix, "job_file": "initial-job"},
-        {"status": "ok", "output": "routed", "layout": prefix, "job_file": "routed-job"},
-    )
-    case = {"role": "scored", "optimization_level": level, "input_domain": "all_zero"}
-    observation = {
-        "seed": 0, "seed_block": "B0", "layout": full,
-        "reference_hash": "hash", "checks": [],
+    routed = {"initial_index_layout": [0, 1], "final_index_layout": [0, 1]}
+    snapshots = {
+        "init": {"output": "initial", "output_hash": "i", "layout": routed},
+        "routing": {"output": "routed", "output_hash": "r", "layout": routed},
     }
-    coordinator.Comparison.__new__(coordinator.Comparison).check_routing(
-        "evolved", case, observation, {0: rows}
-    )
-    check = observation["checks"][0]
+    case = {"role": "scored", "optimization_level": level, "input_domain": "all_zero"}
+    check = quality.routing_check(case, full, snapshots, "hash")
     assert check["layout_equality"] == expected
     if level == 3:
         assert check["status"] == "verified"
         assert check["layout_disagreement"]["full"] == full
-        assert check["layout_disagreement"]["routing_prefix"] == prefix
+        assert check["layout_disagreement"]["routing_snapshot"] == routed
     else:
         assert check["status"] == "mismatch"
+        assert check["witness"]["kind"] == "layout_equality"
+
+
+def test_quality_cache_keeps_snapshot_artifacts_for_later_audit_proofs(tmp_path):
+    run = tmp_path / "run"
+    job = run / "jobs" / "a"
+    (job / "out").mkdir(parents=True)
+    write_json_file = __import__("qtb.canonical", fromlist=["write_json"]).write_json
+    write_json_file(job / "job.json", {"mode": "quality", "seeds": [0]})
+    output = job / "out" / "output-0.gz"
+    output.write_bytes(b"output")
+    snapshot = job / "out" / "snapshot-0-routing.gz"
+    snapshot.write_bytes(b"large-snapshot" * 20)
+    observation = {
+        "id": "o",
+        "seed": 0,
+        "output": str(output),
+        "output_hash": "out",
+        "worker": {
+            "job_file": str(job / "job.json"),
+            "status": "ok",
+            "snapshots": {"routing": {"output": str(snapshot), "output_hash": "s"}},
+        },
+        "checks": [
+            {
+                "oracle": "C6",
+                "status": "verified",
+                "snapshots": [{"stage": "routing", "output": str(snapshot), "output_hash": "s",
+                               "job_file": str(job / "job.json")}],
+            }
+        ],
+    }
+    from qtb.coordinator.storage import prefix_output_deletions
+
+    planned = prefix_output_deletions(run, [observation], 20)
+    assert list(planned) == [str(snapshot.resolve())]
+    assert planned[str(snapshot.resolve())]["output_hash"] == "s"
+    cache = tmp_path / "cache"
+    cache_quality_observation(cache, 0, observation)
+    cached = cached_quality_observation(cache / "0.json")
+    kept = cached["checks"][0]["snapshots"][0]
+    assert kept["output_retained"] is True
+    assert Path(kept["output"]).read_bytes() == snapshot.read_bytes()
+    assert Path(kept["output"]).is_relative_to(cache)
+    assert kept["output_hash"] == "s"
+    assert Path(kept["job_file"]).exists() and Path(kept["job_file"]).is_relative_to(cache)
+    assert cached["worker"]["snapshots"]["routing"]["output"] == kept["output"]
 
 
 def test_build_timeout_terminates_descendants(tmp_path):

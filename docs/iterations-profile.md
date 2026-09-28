@@ -23,7 +23,9 @@ See the [README](../README.md) for the stages, the store and the exit codes.
 
 Files: `profiles/iterations-profile/manifest.json` (the workload) and
 `profiles/iterations-profile/policy.json` (thresholds and measurement protocol). Both are
-version 6.
+version 7: the C7 settings are policy keys (`clifford_seeds` 3, `clifford_full_mode` false)
+and `quality_timeout` classifies a candidate timeout ([quality](workflow/quality.md#timeouts));
+the workload is unchanged from version 6.
 
 ## What it asks
 

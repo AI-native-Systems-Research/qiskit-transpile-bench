@@ -103,8 +103,8 @@ process.
 | Mode | What the worker does | Output |
 | --- | --- | --- |
 | `roundtrip` | Rebuild the input circuit and target from canonical data, then export them again | Hashes that must equal the frozen fixture hashes |
-| `quality` | Build the preset pass manager for (target, options, seed), compile, export | Canonical output circuit, layout, pipeline fingerprint, compile time |
-| `prefix` | Like `quality`, with `pipeline_edits` such as `drop_stage:optimization` | Truncated-pipeline outputs for routing replay and Clifford checks |
+| `quality` | Build the preset pass manager for (target, options, seed), compile, export. `tap:init`/`tap:routing` edits add snapshot taps; `trace` and `capture` add a read-only callback | Canonical output circuit, layout, pipeline fingerprint, compile time; the C6 stage-boundary snapshots and the pass trace when requested |
+| `prefix` | Like `quality`, with `pipeline_edits` such as `drop_stage:optimization` | Truncated-pipeline outputs for the Clifford checks |
 | `timing_e2e` | Warm up, then time complete `transpile()` calls | Raw nanosecond samples |
 | `timing_reuse` | Build the pass manager outside the clock, then time `pm.run()` | Raw samples |
 | `timing_batch` | Run every `timing_e2e`, `timing_reuse` and `preset_build` case of a panel in one process, one result row per case | Raw samples per case |
@@ -153,8 +153,10 @@ src/qtb/
   config/             profile loading, identities, JSON Schemas (schemas/*.json)
   envbuild/           snapshot, build, provenance
   coordinator/
-    __init__.py       Comparison: session, builds, quality, audit, routing replay,
+    __init__.py       Comparison: session, builds, quality scheduling, audit,
                       aggregation, the gate
+    quality.py        C0/C6 checks and the audit proof run in harness processes; batch
+                      schedule, slot pool, failure witnesses
     stages.py         running a stage: locks, preconditions, state.json, stage bodies
     decide.py         decide: evidence merge, stage rules, verdict and report
     clean.py          clean: planned deletions and clean.json

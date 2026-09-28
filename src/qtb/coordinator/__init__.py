@@ -5,30 +5,29 @@ with ``Comparison.create``; every later stage opens it with ``Comparison.open``.
 written per stage, under ``stages/<stage>/``; ``qtb.coordinator.stages`` runs the stages.
 """
 
-import hashlib
+import math
 import os
 import random
 import shutil
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
 from qtb import execution
 from qtb.canonical import (
     atomic_bytes,
-    circuit_lines,
+    canonical_bytes,
     digest,
     file_hash,
-    read_circuit,
     read_json,
     verify_artifact,
     write_json,
 )
 from qtb.config import (
-    STAGES,
     case_hash,
     coordinator_identity,
     data_root,
@@ -37,15 +36,27 @@ from qtb.config import (
 )
 from qtb.coordinator.amend import effective
 from qtb.coordinator.process import run_worker
+from qtb.coordinator.quality import (
+    TAP_EDITS,
+    SlotPool,
+    audit_check,
+    batches,
+    c1_lite_width,
+    check_batch,
+    quality_slots,
+    routing_replay_seeds,
+    seed_seconds,
+    shared_failures,
+)
+from qtb.coordinator.quality import structural_result as structural_result
 from qtb.coordinator.runlog import RunLog, depth, duration, step
 from qtb.coordinator.storage import (
-    append_record,
     cached_quality_observation,
     invalidate_quality_entry,
     locked,
     quality_cache_key,
     quality_entry_valid,
-    read_records,
+    retain_audit_evidence,
     runner_lock,
     store_quality_observation,
 )
@@ -64,45 +75,6 @@ from qtb.envbuild import (
 from qtb.errors import HarnessError, Precondition, Usage
 from qtb.evaluator import record
 from qtb.evaluator.scope import changed_scope, covered
-from qtb.metrics import StructuralChecker, layout_errors
-from qtb.metrics.replay import replay
-
-
-def structural_result(
-    path, target, layout, input_width, initial_layout=None, constraint_form="target"
-):
-    hasher = hashlib.sha256()
-    lines = circuit_lines(path, hasher)
-    header = next(lines)
-    checker = StructuralChecker(header, target, constraint_form)
-    for operation in lines:
-        checker.consume(operation)
-    errors = layout_errors(layout, input_width, header["num_qubits"], initial_layout)
-    checker.errors.extend(errors)
-    result = dict(checker.result(), output_hash=hasher.hexdigest())
-    if not errors:
-        initial = layout["initial_index_layout"] if layout else list(range(input_width))
-        final = layout["final_index_layout"] if layout else list(range(input_width))
-        result["union_width"] = len(
-            checker.active_qubits | set(initial[:input_width]) | set(final[:input_width])
-        )
-    return result
-
-
-# Quality batches compiled at once. Quality metrics are deterministic and nothing reads the
-# compile times of these jobs; timing and memory are measured separately, exclusively.
-QUALITY_BATCHES_IN_FLIGHT = 9
-
-
-def routing_replay_seeds(case, seeds):
-    """C6 scope: scored/basis panels in full, static case guards on ten B0 seeds."""
-    if case["role"] == "scored" or (
-        case["role"] == "guard" and case.get("panel") in {"basis-cx", "basis-ecr"}
-    ):
-        return list(seeds)
-    if case["role"] == "guard" and not case.get("panel"):
-        return [seed for seed in seeds if seed < 10]
-    return []
 
 
 def cost_stage_due(builds, records):
@@ -574,7 +546,9 @@ class Comparison:
             write_json(directory / "ready.json", {"harness": file_hash(wheel)})
         self.run["verifier_python"] = str(python)
 
-    def job(self, revision, case, mode, seeds, edits=(), hash_seed="0"):
+    def job(self, revision, case, mode, seeds, edits=(), hash_seed="0", options=None):
+        """Run one worker job. ``options`` adds job fields: ``trace`` (the pass trace) and
+        ``capture`` (stage-boundary snapshots taken by a read-only callback)."""
         directory = self.directory / "jobs" / uuid.uuid4().hex
         job = {
             "mode": mode,
@@ -584,6 +558,7 @@ class Comparison:
             "timeout_s": case["timeout_s"],
             "pipeline_edits": list(edits),
             "bindings": case.get("bindings", []),
+            **(options or {}),
         }
         with locked(runner_lock(), shared=True):
             result = run_worker(self.run["builds"][revision], job, directory, hash_seed)
@@ -721,7 +696,14 @@ class Comparison:
         size = max(1, min(50, -(-len(entries) // self.workers)))
         chunks = [entries[i : i + size] for i in range(0, len(entries), size)]
 
+        # Inside the quality stage every verifier process holds one of its slots.
+        slots = getattr(self, "_slots", None)
+
         def verify_chunk(chunk):
+            with slots.slot(SlotPool.CHECK) if slots else nullcontext():
+                return verify_pending(chunk)
+
+        def verify_pending(chunk):
             results = {}
             while chunk:
                 batch = self.directory / "oracle-jobs" / f"batch-{uuid.uuid4().hex}"
@@ -762,27 +744,62 @@ class Comparison:
             self.run["hashes"]["implementation"],
         )
 
+    def check_pool(self, workers):
+        """Harness processes for C0, C6 and audit checks. They never import Qiskit; spawned,
+        so no pool thread's state is forked into them."""
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        return ProcessPoolExecutor(
+            max_workers=workers, mp_context=multiprocessing.get_context("spawn")
+        )
+
+    @contextmanager
+    def quality_pools(self):
+        """The stage's slot pool, its check processes and enough driver threads.
+
+        Compile, check, audit and verifier tasks share ``quality_slots`` runnable slots,
+        one fewer than the allocation and at most 15, leaving one for the coordinator.
+        """
+        size = quality_slots(execution.current().workers, os.cpu_count())
+        slots = SlotPool(size)
+        with self.check_pool(size) as pool:
+            self._slots = slots
+            try:
+                with ThreadPoolExecutor(max_workers=2 * size) as drivers:
+                    yield slots, pool, drivers, size
+            finally:
+                self._slots = None
+
+    @property
+    def batch_dir(self):
+        return self.directory / "stages" / getattr(self, "stage", "quality") / "batches"
+
     def quality(self, cases, revisions=("baseline", "evolved")):
         """Compile every quality seed with its C0, C6 and C1-lite checks.
 
         Baseline rows come from the store when present; fresh baseline rows are added to it.
         Evolved rows are never stored. An A/A session bypasses the stored rows, so it stays
-        an independent check. Seeds already in ``observations.jsonl`` are not redone.
+        an independent check.
+
+        Batches follow the policy's per-case schedule and run longest first. Each finished
+        batch is checkpointed (``stages/quality/batches/``) before it counts as done, so a
+        retry redoes only unfinished batches. ``observations.jsonl`` and the failure records
+        are then written from the checkpoints in plan order, whatever order batches ended.
         """
-        block = "B0"
+        protocol = self.policy["measurement_protocol"]
         use_store = self.store is not None and not same_build(self.run["builds"])
-        saved = read_records(self.directory / "observations.jsonl")
-        completed = {(r["case_id"], r["revision"], r["seed"], r["seed_block"]) for r in saved}
-        batch_size = self.policy["measurement_protocol"]["quality_batch_size"]
-        tasks = []
+        confirm = self.run.get("profile") == "confirm-profile"
+        limit = c1_lite_width(protocol) if confirm else None
+        cached, tasks, measured = {}, [], {}
+        checkpointed = {}
+        for path in sorted(self.batch_dir.glob("*.json")):
+            for row in read_json(path)["observations"]:
+                checkpointed[row["revision"], row["case_id"], row["seed"]] = row
+        resumed = 0
         for revision in revisions:
             for case in cases:
-                target = read_json(self.fixtures / case["target"]["file"])
-                seeds = [
-                    s
-                    for s in range(case["seeds_per_block"])
-                    if (case["case_id"], revision, s, block) not in completed
-                ]
+                seeds = list(range(case["seeds_per_block"]))
                 cache = key = None
                 if revision == "baseline" and use_store:
                     key = self.baseline_quality_key(case)
@@ -793,272 +810,315 @@ class Comparison:
                             f"determinism audit; recomputing {case['case_id']}."
                         )
                         cache = None
-                if cache is not None:
-                    remaining = []
-                    for seed in seeds:
-                        path = cache / f"{seed}.json"
-                        if path.exists():
-                            cached = cached_quality_observation(path)
-                            if cached is not None:
-                                cached.update(
-                                    revision=revision,
-                                    cached=True,
-                                    cached_from=key,
-                                    case_id=case["case_id"],
-                                    case_hash=case_hash(case),
-                                )
-                                cached["id"] = digest(
-                                    {
-                                        k: cached[k]
-                                        for k in (
-                                            "case_id",
-                                            "case_hash",
-                                            "build_id",
-                                            "revision",
-                                            "seed",
-                                            "seed_block",
-                                        )
-                                    }
-                                )
-                                append_record(self.directory / "observations.jsonl", cached)
-                                continue
-                        remaining.append(seed)
-                    seeds = remaining
-                for start in range(0, len(seeds), batch_size):
-                    batch = seeds[start : start + batch_size]
-                    tasks.append((revision, case, target, batch, cache))
-        workers = max(1, min(QUALITY_BATCHES_IN_FLIGHT, self.workers))
-        self.progress(
-            f"Quality: {len(tasks)} batches of up to {batch_size} seeds, {workers} at a time."
-        )
-        pool = ThreadPoolExecutor(max_workers=workers)
-        try:
-            futures = [
-                pool.submit(self.quality_batch, revision, case, target, batch)
-                for revision, case, target, batch, _ in tasks
-            ]
-            # Batches compile concurrently but are committed in plan order, so
-            # observations.jsonl and evidence.json do not depend on scheduling.
-            for number, (task, future) in enumerate(zip(tasks, futures, strict=True), 1):
-                revision, case, _, batch, cache = task
-                finished, lite, timings = future.result()
-                started = time.monotonic()
-                verdicts = self.verify_many(
-                    [(case, result, "C1-lite", None, {}) for _, result, _ in lite]
-                )
-                for (observation, _, union_width), check in zip(lite, verdicts, strict=True):
-                    observation["checks"].append(
-                        dict(check, oracle="C1-lite", union_width=union_width)
-                    )
-                timings["verify"] = time.monotonic() - started
-                for observation, result in finished:
-                    if result["status"] != "ok":
-                        subject = "reference" if revision == "baseline" else "evolved"
-                        self.evidence(
-                            record(
-                                f"failure/{observation['id']}",
-                                "completeness",
-                                "unresolved" if result.get("not_attempted") else "failed",
-                                subject,
-                                detail=result.get("error", "Worker failed"),
-                            )
-                        )
-                    append_record(self.directory / "observations.jsonl", observation)
-                    if result["status"] == "ok" and cache is not None:
-                        store_quality_observation(cache, result["seed"], observation)
-                failed = sum(result["status"] != "ok" for _, result in finished)
-                self.progress(
-                    f"Quality batch {number}/{len(tasks)}: {revision} {case['case_id']} "
-                    f"seeds {batch[0]}-{batch[-1]}: "
-                    + ", ".join(f"{name} {duration(value)}" for name, value in timings.items())
-                    + (f"; {failed} failed" if failed else "")
-                )
-        finally:
-            pool.shutdown(wait=True, cancel_futures=True)
-        return read_records(self.directory / "observations.jsonl")
-
-    def quality_batch(self, revision, case, target, batch):
-        """Compile and check one seed batch; runs on a pool thread, so it records nothing.
-
-        Returns the (observation, worker result) pairs, the C1-lite requests still to
-        verify, and how long each part took.
-        """
-        timings = {}
-        started = time.monotonic()
-        rows = self.job(revision, case, "quality", batch)
-        timings["compile"] = time.monotonic() - started
-        started = time.monotonic()
-        prefixes = self.routing_batch(
-            revision, case, [r["seed"] for r in rows if r["status"] == "ok"]
-        )
-        timings["routing prefixes"] = time.monotonic() - started
-        started = time.monotonic()
-        finished, lite = [], []
-        for result in rows:
-            observation = {
-                "format": "qtb-observation/1",
-                "case_id": case["case_id"],
-                "case_hash": case_hash(case),
-                "revision": revision,
-                "build_id": self.run["builds"][revision]["id"],
-                "seed": result["seed"],
-                "seed_block": "B0",
-                "mode": "quality",
-                "worker": result,
-                "circuit_hash": case["circuit"]["sha256"],
-                "reference_hash": case["semantic_reference"].get(
-                    "sha256", case["circuit"]["sha256"]
-                ),
-                "input_domain": case["input_domain"],
-                "target_hash": case["target"]["sha256"],
-                "options": case["options"],
-                "checks": [],
-            }
-            observation["id"] = digest(
-                {
-                    k: observation[k]
-                    for k in ("case_id", "case_hash", "build_id", "revision", "seed", "seed_block")
-                }
-            )
-            if result["status"] == "ok":
-                structural = structural_result(
-                    result["output"],
-                    target,
-                    result["layout"],
-                    case["logical_qubits"],
-                    case["options"].get("initial_layout"),
-                    case["constraint_form"],
-                )
-                if structural["output_hash"] != result["output_hash"]:
-                    raise HarnessError("Exported output hash mismatch")
-                observation.update({k: structural[k] for k in ("D2", "N2") if k in structural})
-                observation.update(
-                    output=result["output"],
-                    output_hash=result["output_hash"],
-                    layout=result["layout"],
-                    fingerprint=result.get("fingerprint", {}),
-                    free_parameters=result.get("free_parameters", []),
-                )
-                observation["checks"].append(dict(structural, oracle="C0"))
-                if structural["status"] == "verified":
-                    self.check_routing(revision, case, observation, prefixes)
+                rows = cached.setdefault((revision, case["case_id"]), {})
+                # A completed local batch takes precedence over the store, including
+                # failures. Successful seeds may have populated the store since this
+                # attempt began; letting those remove seeds first changes batch keys and
+                # can recompile a checkpointed failure or rewrite fresh rows as cached.
+                for seed in seeds:
+                    row = checkpointed.get((revision, case["case_id"], seed))
                     if (
-                        self.run["profile"] == "confirm-profile"
-                        and case["role"] == "scored"
-                        and case["logical_qubits"] <= 25
-                        and result["seed"] < 10
-                        and not observation.get("free_parameters")
+                        row is not None
+                        and row["case_hash"] == case_hash(case)
+                        and row["build_id"] == self.run["builds"][revision]["id"]
                     ):
-                        union_width = structural["union_width"]
-                        if union_width <= 25:
-                            lite.append((observation, result, union_width))
-                        else:
-                            observation["checks"].append(
-                                {
-                                    "status": "unverified",
-                                    "detail": "Union width exceeds limit",
-                                    "oracle": "C1-lite",
-                                    "union_width": union_width,
-                                }
-                            )
-            finished.append((observation, result))
-        timings["checks"] = time.monotonic() - started
-        return finished, lite, timings
-
-    def routing_batch(self, revision, case, seeds):
-        seeds = routing_replay_seeds(case, seeds)
-        if not seeds:
-            return {}
-        initial = self.job(revision, case, "prefix", seeds, [f"drop_stage:{s}" for s in STAGES[1:]])
-        routed = self.job(revision, case, "prefix", seeds, [f"drop_stage:{s}" for s in STAGES[3:]])
-        left, right = ({r["seed"]: r for r in rows} for rows in (initial, routed))
-        missing = {"status": "error"}
-        return {seed: (left.get(seed, missing), right.get(seed, missing)) for seed in seeds}
-
-    def check_routing(self, revision, case, observation, prefixes):
-        seed = observation["seed"]
-        if not routing_replay_seeds(case, [seed]):
-            return
-        initial, routed = prefixes[seed]
-        if initial["status"] != "ok" or routed["status"] != "ok":
-            observation["checks"].append(
-                {"oracle": "C6", "status": "unverified", "detail": "Prefix compilation failed"}
-            )
-            return
-        h0, ops0 = read_circuit(initial["output"])
-        h1, ops1 = read_circuit(routed["output"])
-        elided = initial["layout"]["final_index_layout"] if initial["layout"] else None
-        checked = replay(ops0, ops1, routed["layout"], h0["num_qubits"], h1["num_qubits"], elided)
-        if observation["layout"] == routed["layout"]:
-            checked["layout_equality"] = "matched"
-        elif case["optimization_level"] == 3:
-            checked.update(
-                layout_equality="skipped",
-                layout_disagreement={
-                    "reason": "Level-3 optimization may reapply layout",
-                    "full": observation["layout"],
-                    "routing_prefix": routed["layout"],
-                },
-            )
-        else:
-            checked.update(
-                status="mismatch",
-                detail="Full and routing-prefix layouts differ",
-                layout_equality="mismatch",
-            )
-        checked.update(
-            oracle="C6",
-            reference_hash=observation["reference_hash"],
-            input_domain=case["input_domain"],
-            prefix_jobs=[initial["job_file"], routed["job_file"]],
-            prefix_outputs=[
-                {
-                    "stage": stage,
-                    "output": result["output"],
-                    "output_hash": result.get("output_hash"),
-                    "job_file": result["job_file"],
-                }
-                for stage, result in (("initial", initial), ("routed", routed))
-            ],
+                        rows[seed] = row
+                        resumed += 1
+                if cache is not None:
+                    for seed in seeds:
+                        if seed in rows:
+                            continue
+                        row = self.cached_row(cache, key, case, revision, seed)
+                        if row is not None:
+                            rows[seed] = row
+                # Stored baseline compile times order the batches of both revisions.
+                stored = [r["worker"].get("compile_ns") for r in rows.values()]
+                if stored and all(isinstance(ns, int) for ns in stored):
+                    measured[case["case_id"]] = sum(stored) / len(stored) / 1e9
+                estimate = measured.get(case["case_id"]) or seed_seconds(case, protocol) or 1.0
+                remaining = [seed for seed in seeds if seed not in rows]
+                for batch in batches(case, remaining, protocol):
+                    task_key = digest([revision, case["case_id"], case_hash(case), batch])
+                    tasks.append(
+                        {
+                            "key": task_key,
+                            "revision": revision,
+                            "case": case,
+                            "seeds": batch,
+                            "cache": cache,
+                            "cost": estimate * len(batch),
+                        }
+                    )
+        done = {}
+        pending = sorted(tasks, key=lambda t: -t["cost"])
+        self.progress(
+            f"Quality: {len(tasks)} pending batches, "
+            f"{resumed} checkpointed seeds, "
+            f"{sum(len(r) for r in cached.values()) - resumed} stored baseline seeds."
         )
-        observation["checks"].append(checked)
+        if pending:
+            with self.quality_pools() as (slots, pool, drivers, size):
+                self.progress(f"Quality: {size} runnable tasks at a time, longest first.")
+                futures = {
+                    drivers.submit(self.quality_task, task, slots, pool, limit): task
+                    for task in pending
+                }
+                try:
+                    for number, future in enumerate(as_completed(futures), 1):
+                        task = futures[future]
+                        observations, timings = future.result()
+                        done[task["key"]] = observations
+                        failed = sum(o["worker"]["status"] != "ok" for o in observations)
+                        self.progress(
+                            f"Quality batch {number}/{len(pending)} done: {task['revision']} "
+                            f"{task['case']['case_id']} "
+                            f"seeds {task['seeds'][0]}-{task['seeds'][-1]}: "
+                            + ", ".join(f"{k} {duration(v)}" for k, v in timings.items())
+                            + (f"; {failed} failed" if failed else "")
+                        )
+                except BaseException:
+                    # A crashed batch fails the stage: batches not yet started are not run.
+                    # Those already checkpointed are kept for the retry.
+                    for future in futures:
+                        future.cancel()
+                    raise
+        for task in tasks:
+            rows = cached[task["revision"], task["case"]["case_id"]]
+            for observation in done[task["key"]]:
+                rows[observation["seed"]] = observation
+        ordered = [
+            rows[seed]
+            for revision in revisions
+            for case in cases
+            for rows in [cached[revision, case["case_id"]]]
+            for seed in sorted(rows)
+        ]
+        atomic_bytes(
+            self.directory / "observations.jsonl",
+            b"".join(canonical_bytes(row) + b"\n" for row in ordered),
+        )
+        by_key = {(r["case_id"], r["revision"], r["seed"]): r for r in ordered}
+        for row in ordered:
+            if row["worker"]["status"] != "ok":
+                self.evidence(self.failure_record(row, by_key, protocol))
+        return ordered
+
+    def cached_row(self, cache, key, case, revision, seed):
+        path = cache / f"{seed}.json"
+        if not path.exists():
+            return None
+        row = cached_quality_observation(path)
+        if row is None:
+            return None
+        row.update(
+            revision=revision,
+            cached=True,
+            cached_from=key,
+            case_id=case["case_id"],
+            case_hash=case_hash(case),
+        )
+        row["id"] = digest(
+            {
+                k: row[k]
+                for k in ("case_id", "case_hash", "build_id", "revision", "seed", "seed_block")
+            }
+        )
+        return row
+
+    def quality_task(self, task, slots, pool, limit):
+        """Compile, check and verify one batch, then checkpoint it; runs on a driver thread.
+
+        Each step holds one slot and releases it before waiting for the next.
+        """
+        revision, case, seeds = task["revision"], task["case"], task["seeds"]
+        timings = {}
+        with slots.slot(SlotPool.COMPILE):
+            started = time.monotonic()
+            rows = self.job(revision, case, "quality", seeds, TAP_EDITS, options={"trace": True})
+            timings["compile"] = time.monotonic() - started
+        spec = {
+            "case": case,
+            "case_hash": case_hash(case),
+            "target_path": str(self.fixtures / case["target"]["file"]),
+            "revision": revision,
+            "build_id": self.run["builds"][revision]["id"],
+            "rows": rows,
+            "c1_lite": limit,
+        }
+        with slots.slot(SlotPool.CHECK):
+            started = time.monotonic()
+            checked = pool.submit(check_batch, spec).result()
+            timings["checks"] = time.monotonic() - started
+        observations = checked["observations"]
+        if checked["lite"]:
+            started = time.monotonic()
+            verdicts = self.verify_many(
+                [
+                    (case, observations[index], "C1-lite", None, {"max_qubits": limit})
+                    for index, _ in checked["lite"]
+                ]
+            )
+            for (index, union_width), check in zip(checked["lite"], verdicts, strict=True):
+                observations[index]["checks"].append(
+                    dict(check, oracle="C1-lite", union_width=union_width, max_width=limit)
+                )
+            timings["verify"] = time.monotonic() - started
+        write_json(
+            self.batch_dir / f"{task['key']}.json",
+            {"revision": revision, "case_id": case["case_id"], "seeds": seeds,
+             "observations": observations},
+        )
+        if task["cache"] is not None:
+            for observation in observations:
+                if observation["worker"]["status"] == "ok":
+                    store_quality_observation(task["cache"], observation["seed"], observation)
+        return observations, timings
+
+    def failure_record(self, row, by_key, protocol):
+        """The completeness record of a seed without output.
+
+        A seed that was never attempted is unresolved. A baseline failure is a failed
+        reference record. A candidate timeout (after its fresh-process retry) fails only
+        when it timed out twice, the same baseline seed completed within
+        ``quality_timeout.baseline_fraction`` of the timeout without a retry, and the host
+        load per CPU stayed within ``max_load_per_cpu`` at both timeouts; otherwise it is
+        unresolved. Without that policy key a timeout fails, as before version 7.
+        """
+        result = row["worker"]
+        subject = "reference" if row["revision"] == "baseline" else "evolved"
+        details = {"detail": result.get("error", "Worker failed")}
+        status = "failed"
+        if result.get("not_attempted"):
+            status = "unresolved"
+        elif subject == "evolved" and result.get("timed_out"):
+            rule = protocol.get("quality_timeout")
+            attempts = result.get("attempts", [])
+            baseline = by_key.get((row["case_id"], "baseline", row["seed"]))
+            baseline = baseline["worker"] if baseline else {}
+            details.update(
+                attempts=attempts,
+                baseline_status=baseline.get("status"),
+                baseline_compile_ns=baseline.get("compile_ns"),
+            )
+            if rule is not None:
+                timeout_ns = min(a["timeout_s"] for a in attempts) * 1e9 if attempts else 0
+                margin = (
+                    baseline.get("status") == "ok"
+                    and not baseline.get("timeout_retries")
+                    and isinstance(baseline.get("compile_ns"), int)
+                    and baseline["compile_ns"] <= rule["baseline_fraction"] * timeout_ns
+                )
+                quiet = bool(attempts) and all(
+                    a.get("load_per_cpu") is not None
+                    and a["load_per_cpu"] <= rule["max_load_per_cpu"]
+                    for a in attempts
+                )
+                repeated = result.get("timeouts", 1) >= 2
+                if not (repeated and margin and quiet):
+                    status = "unresolved"
+                details["classification"] = {
+                    "repeated": repeated,
+                    "baseline_margin": margin,
+                    "quiet_host": quiet,
+                    "rule": rule,
+                }
+        return record(f"failure/{row['id']}", "completeness", status, subject, **details)
 
     def audit(self, cases, observations, revisions=("baseline", "evolved")):
+        """Recompile a sample of seeds without taps and compare with their observations.
+
+        The sample is ``audit_fraction`` of each revision's rows (at least
+        ``audit_minimum``), alternating ``PYTHONHASHSEED`` 0 and 1, recompiled in one job
+        per case, revision and hash seed. Each recompile records its pass trace and its
+        stage boundaries through a read-only callback, so a difference can be proven a
+        VF2 tie (``quality.audit_check``); every comparison is kept under
+        ``stages/quality/audit/``. Any other difference leaves the audit unresolved and
+        invalidates stored baseline quality.
+        """
+        protocol = self.policy["measurement_protocol"]
+        fraction = protocol.get("audit_fraction", 0.05)
+        minimum = protocol.get("audit_minimum", 10)
         by_case = {c["case_id"]: c for c in cases}
         rng = random.Random(self.policy["rng_seed"])
         ok = True
-        specs, sampled = [], []
+        groups = {}
         for revision in revisions:
             rows = [
                 r
                 for r in observations
                 if r["revision"] == revision and r.get("output_hash") and r["seed_block"] == "B0"
             ]
-            count = min(len(rows), max(10, int(len(rows) * 0.05 + 0.999)))
+            count = min(len(rows), max(minimum, math.ceil(len(rows) * fraction)))
             if not rows:
                 ok = False
             for i, row in enumerate(rng.sample(rows, count)):
-                specs.append(
-                    (
-                        revision,
-                        by_case[row["case_id"]],
-                        "quality",
-                        [row["seed"]],
-                        (),
-                        "1" if i % 2 else "0",
-                    )
-                )
-                sampled.append(row)
-        self.progress(f"Determinism audit: recompiling {len(specs)} sampled seeds.")
-        for row, results in zip(sampled, self.jobs(specs), strict=True):
-            result = results[0]
-            if (
-                result["status"] != "ok"
-                or result.get("output_hash") != row["output_hash"]
-                or result.get("layout") != row["layout"]
-            ):
-                ok = False
-        self.evidence(record("audit/determinism", "completeness", "passed" if ok else "unresolved"))
+                hash_seed = "1" if i % 2 else "0"
+                groups.setdefault((revision, row["case_id"], hash_seed), []).append(row)
+        sampled = sum(len(rows) for rows in groups.values())
+        self.progress(
+            f"Determinism audit: recompiling {sampled} sampled seeds in {len(groups)} jobs."
+        )
+        proofs = []
+        directory = self.directory / "stages" / getattr(self, "stage", "quality") / "audit"
+        if groups:
+            with self.quality_pools() as (slots, pool, drivers, _):
+
+                def audit_group(item):
+                    (revision, case_id, hash_seed), rows = item
+                    case = by_case[case_id]
+                    with slots.slot(SlotPool.COMPILE):
+                        results = self.job(
+                            revision,
+                            case,
+                            "quality",
+                            sorted(r["seed"] for r in rows),
+                            (),
+                            hash_seed,
+                            options={"trace": True, "capture": ["init", "routing"]},
+                        )
+                    by_seed = {r["seed"]: r for r in results}
+                    found = []
+                    for row in rows:
+                        spec = {
+                            "case": case,
+                            "row": row,
+                            "result": by_seed[row["seed"]],
+                            "hash_seed": hash_seed,
+                            "target_path": str(self.fixtures / case["target"]["file"]),
+                        }
+                        with slots.slot(SlotPool.CHECK):
+                            proof = pool.submit(audit_check, spec).result()
+                            if proof["status"] == "passed_vf2_tie":
+                                proof["evidence"] = retain_audit_evidence(
+                                    spec, directory / f"{row['id']}-{hash_seed}"
+                                )
+                            found.append(proof)
+                    return found
+
+                for found in drivers.map(audit_group, list(groups.items())):
+                    proofs.extend(found)
+        for proof in proofs:
+            write_json(directory / f"{proof['observation']}-{proof['hash_seed']}.json", proof)
+            if proof["status"] == "passed_vf2_tie" and proof["revision"] == "baseline":
+                self.keep_audit_proof(by_case[proof["case_id"]], proof)
+        unresolved = [p for p in proofs if p["status"] == "unresolved"]
+        ties = [p for p in proofs if p["status"] == "passed_vf2_tie"]
+        ok = ok and not unresolved
+        first = (unresolved or ties or [None])[0]
+        details = {"sampled": sampled, "vf2_ties": len(ties), "differences": len(unresolved)}
+        if first is not None:
+            details["first_difference"] = {
+                k: first.get(k)
+                for k in ("case_id", "revision", "seed", "hash_seed", "field", "reason", "first")
+            }
+        self.evidence(
+            record(
+                "audit/determinism",
+                "completeness",
+                "passed" if ok else "unresolved",
+                **details,
+            )
+        )
         if not ok and self.store is not None and "baseline" in revisions:
             # Stored baseline rows cannot remain reusable after a failed determinism audit.
             # Correctness and unit-test entries stay: the audit did not test them.
@@ -1068,9 +1128,30 @@ class Comparison:
                     f"Determinism audit failed in session {self.directory}",
                 )
 
+    def keep_audit_proof(self, case, proof):
+        """A stored baseline row keeps the proof that its audited recompile was a VF2 tie."""
+        if self.store is None or same_build(self.run["builds"]):
+            return
+        entry = self.store.quality_dir(self.baseline_quality_key(case))
+        if (entry / f"{proof['seed']}.json").exists():
+            name = f"{proof['seed']}.audit-{proof['hash_seed']}"
+            evidence = retain_audit_evidence(read_json(proof["evidence"]), entry / name)
+            write_json(entry / f"{name}.json", dict(proof, evidence=evidence))
+
     def aggregate_checks(self, cases, observations):
+        """The C0, C6 and C1-lite records over both revisions, and completeness.
+
+        A failure both revisions share on the same case and seed, with the same failure
+        witness (``quality.shared_failures``), is not a candidate failure: the baseline's
+        failed record makes the verdict ``INCONCLUSIVE``, and the aggregate record stays
+        unresolved and names the pair. Any other evolved failure remains failed.
+        """
         quality = [r for r in observations if r["seed_block"] == "B0"]
+        subjects = {"baseline": "reference", "evolved": "evolved"}
         if self.run["profile"] == "confirm-profile":
+            limit = c1_lite_width(self.policy["measurement_protocol"])
+            shared = shared_failures(quality, "C1-lite")
+            excused = {pair["evolved"] for pair in shared.values()}
             eligible = {}
             for row in quality:
                 for check in row["checks"]:
@@ -1078,31 +1159,49 @@ class Comparison:
                         continue
                     key = row["case_id"], row["seed"]
                     eligible.setdefault(key, {})[row["revision"]] = check
-                    if check["status"] == "mismatch":
+                    if check["status"] == "mismatch" and row["id"] not in excused:
                         self.evidence(
                             record(
                                 f"C1-lite/{row['id']}",
                                 "correctness",
                                 "failed",
-                                "reference" if row["revision"] == "baseline" else "evolved",
+                                subjects[row["revision"]],
                             )
                         )
-            applicable = [
-                pair
-                for pair in eligible.values()
-                if pair.get("baseline", {}).get("union_width", 26) <= 25
-            ]
-            okay = bool(applicable) and all(
-                pair.get(rev, {}).get("status") == "verified"
-                for pair in applicable
-                for rev in ("baseline", "evolved")
+            # A pair is required when the baseline output fits the limit; the evolved
+            # output must then verify too. A wider or missing evolved check leaves it open.
+            applicable = {
+                key: pair
+                for key, pair in eligible.items()
+                if pair.get("baseline", {}).get("union_width", limit + 1) <= limit
+            }
+            open_pairs = sorted(
+                key
+                for key, pair in applicable.items()
+                if any(pair.get(rev, {}).get("status") != "verified" for rev in subjects)
             )
+            overruns = sorted(
+                key
+                for key, pair in applicable.items()
+                if pair.get("evolved", {}).get("union_width", limit + 1) > limit
+            )
+            exclusions = sum(
+                pair.get("baseline", {}).get("union_width", 0) > limit
+                for pair in eligible.values()
+            )
+            okay = bool(applicable) and not open_pairs
             self.evidence(
                 record(
                     "CA1/C1-lite",
                     "correctness",
                     "passed" if okay else "unresolved",
                     eligible_observations=len(applicable),
+                    max_width=limit,
+                    unverified_pairs=[list(key) for key in open_pairs[:50]],
+                    unverified_count=len(open_pairs),
+                    baseline_width_exclusions=exclusions,
+                    evolved_width_overruns=[list(key) for key in overruns[:50]],
+                    **({"shared_failures": sorted(shared.values(), key=str)} if shared else {}),
                 )
             )
         expected = sum(c["seeds_per_block"] for c in cases) * 2
@@ -1122,12 +1221,14 @@ class Comparison:
                     for case in cases
                 )
             )
+            shared = shared_failures(quality, oracle)
+            excused = {pair["evolved"] for pair in shared.values()}
             checks = [c for row in quality for c in row["checks"] if c["oracle"] == oracle]
-            for revision, subject in (("baseline", "reference"), ("evolved", "evolved")):
+            for revision, subject in subjects.items():
                 failures = [
                     row["id"]
                     for row in quality
-                    if row["revision"] == revision
+                    if row["revision"] == revision and row["id"] not in excused
                     for c in row["checks"]
                     if c["oracle"] == oracle and c["status"] == "mismatch"
                 ]
@@ -1146,4 +1247,11 @@ class Comparison:
                 if len(checks) == required and all(c["status"] == "verified" for c in checks)
                 else "unresolved"
             )
-            self.evidence(record(f"{self.prefix}1/{oracle}", "correctness", status))
+            self.evidence(
+                record(
+                    f"{self.prefix}1/{oracle}",
+                    "correctness",
+                    status,
+                    **({"shared_failures": sorted(shared.values(), key=str)} if shared else {}),
+                )
+            )

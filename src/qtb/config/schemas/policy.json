@@ -45,15 +45,129 @@
     "measurement_protocol": {
       "type": "object",
       "properties": {
-        "quality_batch_size": {"type": "integer", "minimum": 1, "maximum": 25},
-        "warmups": {"type": "integer", "minimum": 0},
-        "minimum_calls": {"type": "integer", "minimum": 1},
-        "minimum_ns": {"type": "integer", "minimum": 0},
-        "screen_rounds": {"type": "integer", "minimum": 0},
-        "timing_rounds": {"type": "integer", "minimum": 1},
-        "companion_rounds": {"type": "integer", "minimum": 1},
-        "memory_processes": {"type": "integer", "minimum": 1},
-        "rerun_multiplier": {"type": "integer", "minimum": 2}
+        "quality_batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "warmups": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "minimum_calls": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minimum_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "screen_rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timing_rounds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "companion_rounds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_processes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rerun_multiplier": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "quality_batch_schedule": {
+          "description": "Per-case quality batch sizes; replaces quality_batch_size when present",
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "target_batch_s": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "default_seed_s": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "seed_s": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            }
+          },
+          "required": [
+            "version",
+            "target_batch_s",
+            "default_seed_s",
+            "seed_s"
+          ],
+          "additionalProperties": false
+        },
+        "c1_lite_max_width": {
+          "description": "Baseline union width at which a C1-lite pair is required; also the verifier limit",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 25
+        },
+        "quality_timeout": {
+          "description": "Classification of a candidate quality timeout after one fresh-process retry",
+          "type": "object",
+          "properties": {
+            "baseline_fraction": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1
+            },
+            "max_load_per_cpu": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "required": [
+            "baseline_fraction",
+            "max_load_per_cpu"
+          ],
+          "additionalProperties": false
+        },
+        "companion_seeds": {
+          "description": "Frozen companion seed IDs; archived policies without it use 0-19",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 2,
+          "uniqueItems": true
+        },
+        "companion_groups": {
+          "description": "Input groups whose scored level-2 case forms the companion panel, in order",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "audit_fraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "audit_minimum": {
+          "type": "integer",
+          "minimum": 1
+        }
       },
       "required": [
         "quality_batch_size",
@@ -71,11 +185,27 @@
       "description": "Fixed cost guards; no machine calibration is measured",
       "type": "object",
       "properties": {
-        "panel_ratio": {"type": "number", "exclusiveMinimum": 1},
-        "case_ratio": {"type": "number", "exclusiveMinimum": 1},
-        "case_floor_ns": {"type": "integer", "minimum": 0},
-        "case_floor_bytes": {"type": "integer", "minimum": 0},
-        "screen_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+        "panel_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 1
+        },
+        "case_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 1
+        },
+        "case_floor_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "case_floor_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "screen_fraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        }
       },
       "required": [
         "panel_ratio",
@@ -89,10 +219,19 @@
     "upstream_test_budgets_s": {
       "type": "object",
       "properties": {
-        "python": {"type": "integer", "minimum": 1},
-        "rust": {"type": "integer", "minimum": 1}
+        "python": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rust": {
+          "type": "integer",
+          "minimum": 1
+        }
       },
-      "required": ["python", "rust"],
+      "required": [
+        "python",
+        "rust"
+      ],
       "additionalProperties": false
     },
     "bootstrap_replicates": {
@@ -109,6 +248,22 @@
         "type": "string"
       },
       "minItems": 0
+    },
+    "clifford_seeds": {
+      "description": "C7 seeds per Clifford variant and mode; archived policies use the old constants",
+      "type": "integer",
+      "minimum": 1
+    },
+    "clifford_full_mode": {
+      "description": "Whether C7 also compiles the full pipeline (diagnostic)",
+      "type": "boolean"
+    },
+    "quality_cap_rule": {
+      "description": "plain: ratio > quality_cap breaches; noise_aware: also ln(ratio) > guard_multiplier * SE_case",
+      "enum": [
+        "plain",
+        "noise_aware"
+      ]
     }
   },
   "required": [

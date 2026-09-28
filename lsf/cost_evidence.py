@@ -38,6 +38,9 @@ VALIDATOR = "lsf.cost_evidence:validate"
 ENTRY_POINT = "python -m lsf.job (submitted by the LSF manager)"
 # Windows are contiguous: one window's end is the next one's start.
 TOLERANCE_S = 1e-6
+# Companion seeds per worker job when the harness passes no ``seeds`` (older callers,
+# archived policies): the historical 0–19.
+LEGACY_COMPANION_SEEDS = 20
 
 
 def requirement(tier):
@@ -81,8 +84,12 @@ def _expected_jobs(estimator, count, cases):
     return count * len(cases) * len(arms)
 
 
-def problems(bundle, required, *, estimator, count, cases):
-    """Every reason ``bundle``'s monitoring evidence is inadmissible; empty when admissible."""
+def problems(bundle, required, *, estimator, count, cases, seeds=None):
+    """Every reason ``bundle``'s monitoring evidence is inadmissible; empty when admissible.
+
+    ``seeds`` are the policy's companion seed IDs: each companion worker job must have one
+    measured interval per seed. Without it a companion job must have 20, as before.
+    """
     found = []
     if bundle.get("measurement_mode") != "cores":
         return [f"measured in {bundle.get('measurement_mode', 'an unlabelled')} mode, not cores"]
@@ -134,11 +141,15 @@ def problems(bundle, required, *, estimator, count, cases):
         found.append("no valid idle probe")
     elif idle["foreign_s"] < 0 or not check_a(idle["foreign_s"], idle["seconds"], thresholds)[0]:
         found.append("the idle probe saw foreign activity")
-    found += _coverage_problems(bundle, monitor, thresholds, worker, estimator, count, cases)
+    found += _coverage_problems(
+        bundle, monitor, thresholds, worker, estimator, count, cases, seeds
+    )
     return found
 
 
-def _coverage_problems(bundle, monitor, thresholds, worker_cpus, estimator, count, cases):
+def _coverage_problems(
+    bundle, monitor, thresholds, worker_cpus, estimator, count, cases, seeds=None
+):
     found = []
     jobs = bundle.get("worker_jobs") or []
     labels = [job.get("job") for job in jobs]
@@ -164,7 +175,12 @@ def _coverage_problems(bundle, monitor, thresholds, worker_cpus, estimator, coun
         found += _record_problems(record, thresholds, worker_cpus)
         if len(found) > 20:
             break
-    per_job = len(cases) if estimator == "timing" else 20 if estimator == "companion" else 1
+    if estimator == "timing":
+        per_job = len(cases)
+    elif estimator == "companion":
+        per_job = LEGACY_COMPANION_SEEDS if seeds is None else len(seeds)
+    else:
+        per_job = 1
     for label in labels:
         measured = sum(len(r.get("measurements", [])) for r in records if r.get("job") == label)
         if measured != per_job:
@@ -231,9 +247,11 @@ def _record_problems(record, thresholds, worker_cpus):
     return found
 
 
-def validate(bundle, required, *, estimator, count, cases):
+def validate(bundle, required, *, estimator, count, cases, seeds=None):
     """The extension entry point named by ``VALIDATOR``; ``Incomplete`` when inadmissible."""
-    found = problems(bundle, required, estimator=estimator, count=count, cases=cases)
+    found = problems(
+        bundle, required, estimator=estimator, count=count, cases=cases, seeds=seeds
+    )
     fields = dict(
         component="evidence",
         session_id=bundle.get("session_id"),

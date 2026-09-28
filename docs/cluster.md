@@ -369,8 +369,8 @@ Each stage can run on a different host. Then:
   interpreter exists and runs. Otherwise it exits 41.
 - **Workers.** A stage job uses the slots LSF granted (translated by `lsf/context.py`); a
   direct run uses one less than the CPU count, at most 12. The number is recorded in the
-  stage's `state.json`. Quality compiles still run at most nine batches at once, and cost is
-  serial.
+  stage's `state.json`. Quality runs one fewer task than its slots at once (15 on its 16-slot
+  job: compiles, checks, audit recompiles and verification), and cost is serial.
 - **Machine identity.** Each stage records its own host in `state.json`. `run.json:machine`
   is the `compile` host, for information only. The baseline quality key uses the `quality`
   host's CPU, and cost bundles record the `cost` host and its monitoring evidence.

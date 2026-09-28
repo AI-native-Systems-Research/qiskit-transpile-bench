@@ -104,9 +104,10 @@ The harness never reads a scheduler's environment. A scheduler entry point trans
 allocation into an execution context (`qtb.execution`): on LSF, `lsf/context.py` turns the
 granted slots into the worker count and the job's identity into the state's `scheduler`
 record. Without one the default is one less than the CPU count, at most twelve and at least
-one. There is no command-line override. Quality has an additional limit of nine concurrent
-batches, `compile` splits the granted slots between its two concurrent builds, and cost
-measurements are serial. Each stage records the count and its host in `state.json`.
+one. There is no command-line override. Quality runs one fewer task than the allocation (at
+most 15, counted from the CPU count without an allocation) across compiles, checks, the audit
+and verification, `compile` splits the granted slots between its two concurrent builds, and
+cost measurements are serial. Each stage records the count and its host in `state.json`.
 
 ## Reproducibility
 

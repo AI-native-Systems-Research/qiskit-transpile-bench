@@ -52,16 +52,18 @@ can contain failed checks and still exit 0; `decide` reports their effect on the
 | `verifier-cache/` | Any stage | Verifier results, addressed by content. Only `verified` and `mismatch` results are kept; writes are atomic and an entry is re-checked before reuse |
 | `observations.jsonl` | `quality` | One line per quality compile (see below) |
 | `correctness.jsonl` | `correctness` | Every C0–C5 check from the correctness suite |
-| `clifford.jsonl` | `correctness` | C7 results: prefix pipeline, plus the full pipeline in the confirm profile |
+| `clifford.jsonl` | `correctness` | C7 results, one per case, mode and seed: prefix pipeline, plus the full pipeline where the policy's `clifford_full_mode` is set (confirm) |
 | `changed-tests.json` | `unit-tests` | Test files and Rust sources that the evolved tree changed |
 | `upstream-baseline/`, `upstream-evolved/` | `unit-tests` | Upstream pytest records (`tests.jsonl.gz`, failure text kept only for failed tests), `tests.log`, `rust.log` and the copied `test/` tree. With a stored baseline, the baseline records and logs stay in the store entry and `upstream-baseline/` is not written |
 | `upstream-evolved-own/`, `upstream-evolved-own.json` | `unit-tests` | Report-only run of the candidate's own Python tests |
 | `cost/<panel>/screen.json`, `normal.json`, `rerun.json` | `cost` | Raw two-arm timing or memory bundles, one per regime reached ([below](#cost-bundles)); sessions in subdirectories. A timing session holds one `timing_batch` job per round and arm. A session interrupted by interference keeps its jobs and a `contaminated.json` |
 | `cost/monitor/<job key>/` | `cost` (monitored) | `preflight.json` (allocation, layout, machine, idle probe) and `contamination*.json` (the failing window and its worker record) of one cost invocation |
-| `jobs/<uuid>/` | Worker | `job.json`, `worker.log`, `out/results.jsonl`, output circuits `out/output-<seed>.ops.jsonl.gz` |
+| `jobs/<uuid>/` | Worker | `job.json`, `worker.log`, `out/results.jsonl`, output circuits `out/output-<seed>.ops.jsonl.gz`, and for a quality or audit compile the C6 stage-boundary snapshots `out/snapshot-<seed>-init.ops.jsonl.gz` and `out/snapshot-<seed>-routing.ops.jsonl.gz`. `again-<seed>/` holds the one retry of a seed that timed out, `retry-<seed>/` the later seeds of that batch |
 | `oracle-jobs/<uuid>/` | Verifier | `job.json`, `result.json` for each distinct verifier job not already cached |
 | `oracle-jobs/batch-<uuid>/` | Verifier | `batch.json` (the jobs one verifier process ran, in order) and its `verifier.log` |
 | `stages/<stage>/state.json` | That stage | The stage's state ([below](#stagesstagestatejson)) |
+| `stages/quality/batches/<key>.json` | `quality` | One checkpoint per finished quality batch: its revision, case, seeds and observations. `observations.jsonl` is written from these in plan order; a retry skips checkpointed batches |
+| `stages/quality/audit/<observation>-<hash seed>.json` | `quality` | One determinism-audit comparison per audited seed: `status` (`passed`, `passed_vf2_tie` or `unresolved`), the first differing `field`, the `reason`, and for a difference the first differing pass (`first`), the physical-wire `permutation`, and the `metrics` and check `outcomes` of both compiles |
 | `stages/<stage>/evidence.json` | That stage | The constraint records the stage produced |
 | `stages/<stage>/invocations.jsonl` | That stage | One line per invocation that ended: status, exit, invocation identity, host, times, reason |
 | `stages/<stage>/progress.log` | That stage | Timestamped progress (wall clock and elapsed time), a start/end line with the duration of every step, one line per quality batch, and the stage's table of step durations. A retried stage appends to it |
@@ -178,7 +180,7 @@ Schema: `src/qtb/config/schemas/decision.json` (format `qtb-decision/1`).
 | `required_ids` | The record IDs that must all pass for `PASS` |
 | `reasons` | Every record that did not pass: `code`, `result`, `detail` |
 | `missing_records` | Required IDs with no record at all |
-| `summaries` | Per-panel estimates: `ln_score`, `score`, `SE`, `ln_score_plus_2SE`, per-seed `deltas`, and per-case estimates with `worst_seed`; confirm also has `instance_bootstrap` and `leave_iterations_out` |
+| `summaries` | Per-panel estimates: `ln_score`, `score`, `SE`, `ln_score_plus_2SE`, per-seed `deltas`, and per-case estimates with `worst_seed`; confirm also has `instance_bootstrap`, `leave_iterations_out` (`D2`) and `leave_iterations_out/N2` |
 | `scope` | Changed stages, substituted components and unmapped paths, per optimization level |
 | `cost_thresholds` | The fixed cost thresholds of the archived policy that every cost record was judged against |
 | `fingerprint_changes` | Cases whose pipeline fingerprint (pass list and search budgets, seed 0) differs between revisions |
@@ -283,7 +285,7 @@ Format `qtb-clean/1`:
 | `status` | `cleaning` while deleting, then `complete` |
 | `started_at`, `finished_at` | When the cleanup started and ended |
 | `stage_state_hashes` | The stage-state hashes checked against `decision.json` |
-| `planned` | Every path to delete. A directory: `kind: directory`, `files`, `bytes` and `listing_sha256` (a digest of its file list and sizes). A file: `kind: file`, `bytes`, `output_hash`, `observation_id`, `compressed_sha256`, `compressed_bytes`, and for a C6 prefix also `oracle`, `stage` and `job_file` |
+| `planned` | Every path to delete. A directory: `kind: directory`, `files`, `bytes` and `listing_sha256` (a digest of its file list and sizes). A file: `kind: file`, `bytes`, `output_hash`, `observation_id`, `compressed_sha256`, `compressed_bytes`, and for a C6 snapshot (or pre-version-7 prefix) also `oracle`, `stage` and `job_file` |
 | `freed_bytes` | The total size of the planned items |
 
 
@@ -301,10 +303,10 @@ One JSON object per compile of a quality case (schema `observation.json`, format
 | `id` | Hash of case, case definition, build, revision, seed and block |
 | `case_id`, `case_hash`, `revision`, `build_id`, `seed`, `seed_block` | Which compile this is |
 | `D2`, `N2` | Metrics computed by the harness (absent if the compile failed or the circuit is dynamic) |
-| `checks` | C0 always; C6 and C1-lite where applicable. Each has `oracle`, `status`, and details |
+| `checks` | C0 always; C6 and C1-lite where applicable. Each has `oracle`, `status`, and details. A `mismatch` of C0 or C6 has a `witness` (the evidence that decides whether a baseline and a candidate failure are the same). C6 lists its `snapshots` (stage, output, hash and the job that wrote them); C1-lite has `union_width` and `max_width` |
 | `output`, `output_hash`, `layout` | Path and hash of the canonical output, and its layout arrays |
 | `fingerprint` | Pass names per stage and readable search budgets (`unknown` when unreadable) |
-| `worker` | The worker's raw result, including `compile_ns` and `status`/`error` |
+| `worker` | The worker's raw result, including `compile_ns`, `status`/`error`, the `snapshots` (C6 inputs) and the pass `trace` (one `[pass, stage, DAG size, layout digest]` per executed pass). `snapshot_errors` names each snapshot that could not be captured or exported; the output stands and C6 is `unverified`. A timed-out seed has `timed_out`, `timeouts` and one entry per attempt in `attempts` (`timeout_s`, `load_per_cpu`); a seed that finished on its retry has `timeout_retries: 1` |
 | `cached`, `cached_from` | `true` and the store key when the observation was replayed from the store |
 
 ## Canonical circuit files (`*.ops.jsonl.gz`)

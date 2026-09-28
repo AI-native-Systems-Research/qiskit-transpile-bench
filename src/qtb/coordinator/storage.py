@@ -23,6 +23,7 @@ COST_PROTOCOL_KEYS = {
     "timing_rounds",
     "companion_rounds",
     "companion_seeds",
+    "companion_groups",
     "memory_processes",
     "rerun_multiplier",
 }
@@ -177,9 +178,33 @@ def cache_quality_observation(cache, seed, observation):
             cached["cache_output_sha256"] = file_hash(destination)
         else:
             cached["worker"][field] = str(destination)
+    # A later audit may need these exact snapshots to reproduce a VF2 proof after the
+    # producing session has been cleaned. Keep them with the reusable observation.
+    snapshots = cached["worker"].get("snapshots")
+    if snapshots:
+        cached["worker"]["snapshots"] = deepcopy(snapshots)
+        for stage, value in cached["worker"]["snapshots"].items():
+            if value.get("output"):
+                destination = cache / f"{seed}.snapshot-{stage}.ops.jsonl.gz"
+                copy_artifact(value["output"], destination)
+                value.update(output=str(destination), output_retained=True)
     for check in cached["checks"]:
         if check.get("oracle") != "C6":
             continue
+        if check.get("snapshots"):
+            check["snapshots"] = [
+                dict(
+                    snapshot,
+                    output=cached["worker"].get("snapshots", {}).get(
+                        snapshot["stage"], {}
+                    ).get("output"),
+                    output_retained=bool(cached["worker"].get("snapshots", {}).get(
+                        snapshot["stage"], {}
+                    ).get("output")),
+                    job_file=cached["worker"]["job_file"],
+                )
+                for snapshot in check["snapshots"]
+            ]
         prefix_jobs = []
         for index, prefix in enumerate(check.get("prefix_outputs", [])):
             if not prefix.get("job_file"):
@@ -193,6 +218,48 @@ def cache_quality_observation(cache, seed, observation):
         if prefix_jobs:
             check["prefix_jobs"] = prefix_jobs
     write_json(cache / f"{seed}.json", cached)
+
+
+def retain_audit_evidence(spec, directory):
+    """Keep a self-contained audit input outside jobs/ and outside its source session.
+
+    Both exported outputs, their traces/layouts/checks, available boundary snapshots and
+    the target travel with the proof. Re-running audit_check on evidence.json must work
+    after clean, including for proofs copied into the baseline store.
+    """
+    directory = Path(directory).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    saved = deepcopy(spec)
+    copied = {}
+
+    def retain(source):
+        source = str(Path(source).resolve())
+        if source not in copied:
+            destination = directory / f"{len(copied)}-{Path(source).name}"
+            shutil.copyfile(source, destination)
+            copied[source] = str(destination)
+        return copied[source]
+
+    saved["target_path"] = retain(saved["target_path"])
+    for side in (saved["row"], saved["result"]):
+        side["output"] = retain(side["output"])
+        worker = side.get("worker", side)
+        if worker.get("output"):
+            worker["output"] = side["output"]
+        if worker.get("job_file"):
+            worker["job_file"] = retain(worker["job_file"])
+        for snapshot in worker.get("snapshots", {}).values():
+            if snapshot.get("output"):
+                snapshot["output"] = retain(snapshot["output"])
+        for check in side.get("checks", []):
+            for snapshot in check.get("snapshots", []):
+                if snapshot.get("output"):
+                    snapshot["output"] = retain(snapshot["output"])
+                if snapshot.get("job_file"):
+                    snapshot["job_file"] = retain(snapshot["job_file"])
+    path = directory / "evidence.json"
+    write_json(path, saved)
+    return str(path)
 
 
 def cached_quality_observation(path):
@@ -257,14 +324,24 @@ def output_deletions(directory, observations, limit):
 
 
 def prefix_output_deletions(directory, observations, limit):
-    """Plan deletion of verified C6 prefixes whose hash and job survive in the evidence."""
+    """Plan deletion of verified C6 inputs whose hash and job survive in the evidence.
+
+    These are the stage-boundary snapshots written by the quality compile itself, and the
+    routing-prefix outputs of sessions before version 7.
+    """
     directory = Path(directory).resolve()
     planned = {}
     for row in observations:
         for check in row.get("checks", []):
             if check.get("oracle") != "C6" or check.get("status") != "verified":
                 continue
-            for prefix in check.get("prefix_outputs", []):
+            entries = [(p, "prefix") for p in check.get("prefix_outputs", [])]
+            entries += [
+                (dict(s, job_file=s.get("job_file") or row.get("worker", {}).get("job_file")),
+                 "quality")
+                for s in check.get("snapshots", [])
+            ]
+            for prefix, mode in entries:
                 if not all(prefix.get(key) for key in ("output", "output_hash", "job_file")):
                     continue
                 output = Path(prefix["output"]).resolve()
@@ -279,7 +356,7 @@ def prefix_output_deletions(directory, observations, limit):
                 ):
                     continue
                 job = read_json(job_file)
-                if job.get("mode") != "prefix" or row.get("seed") not in job.get("seeds", []):
+                if job.get("mode") != mode or row.get("seed") not in job.get("seeds", []):
                     continue
                 # The archived C6 check and job identify the verification and compile.
                 planned[str(output)] = {

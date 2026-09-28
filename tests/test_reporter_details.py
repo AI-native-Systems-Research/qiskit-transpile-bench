@@ -22,6 +22,8 @@ def test_report_uses_archived_quality_and_zero_baseline_evidence():
         "instance_bootstrap": {
             "status": "reported", "U_instance": -0.1, "group_counts": {"G1": 3}
         },
+        "leave_iterations_out": {**panel, "score": 0.95},
+        "leave_iterations_out/N2": {**panel, "score": 1.02},
     }
     fingerprint_a = {"layout": [{"pass": "OldPass", "budget": {"trials": 1}}]}
     fingerprint_b = {"layout": [{"pass": "NewPass", "budget": {"trials": 2}}]}
@@ -69,6 +71,8 @@ def test_report_uses_archived_quality_and_zero_baseline_evidence():
     assert "| optimization_level | 2 | D2 |" in report
     assert "| zero | D2 | 1 | 1 | 0 | 1 |" in report
     assert "Input groups by family: G1: 3." in report
+    assert "- D2 ratio 0.950000 (paired SE 0.010000; cases: 1; seeds: 2)." in report
+    assert "- N2 ratio 1.020000 (paired SE 0.010000; cases: 1; seeds: 2)." in report
     assert "Uncovered scored cases: scored." in report
     assert "OldPass" in report and "NewPass" in report
     assert "No frozen exclusions artifact was recorded" in report
@@ -87,3 +91,31 @@ def test_missing_evidence_is_marked_unavailable():
     assert decision["trade_score"] is None
     assert all(row["status"] == "unavailable" for row in decision["zero_baseline_deltas"]["cases"])
     assert "Primary D2 estimate: unavailable" in render_report(decision)
+
+
+def test_report_shows_seed_count_range_of_mixed_panel():
+    def panel(low, high):
+        return {
+            "score": 0.98, "ln_score": math.log(0.98), "SE": 0.01,
+            "ln_score_plus_2SE": math.log(0.98) + 0.02,
+            "cases": {"a": {"worst_seed": 0}, "b": {"worst_seed": 1}},
+            "seeds": list(range(high)),
+            "seed_counts": {"min": low, "max": high},
+        }
+
+    summaries = {
+        "CA2/improvement": panel(50, 100),
+        "CA4/family/G1/D2": panel(50, 100),
+        "CA4/family/G2/D2": panel(100, 100),
+    }
+    decision = make_decision(
+        {"profile": "confirm-profile", "hashes": {}, "run_id": "r"},
+        [record("CA2/improvement", "improvement", "passed")],
+        ["CA2/improvement"],
+        summaries,
+    )
+    report = render_report(decision)
+    assert "| CA2/improvement | 0.980000 | 0.010000 | " in report
+    assert "| 50–100 per case |" in report
+    assert "| family | G1 | D2 | 0.980000 | 0.010000 | 2 | 50–100 per case |" in report
+    assert "| family | G2 | D2 | 0.980000 | 0.010000 | 2 | 100 |" in report

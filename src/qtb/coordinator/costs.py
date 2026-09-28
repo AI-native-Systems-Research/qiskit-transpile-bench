@@ -34,6 +34,7 @@ from qtb.errors import Contaminated, HarnessError, Incomplete
 from qtb.evaluator import record
 from qtb.evaluator.cost import (
     MEASURED_ARMS,
+    companion_seeds,
     cost_guard,
     regime_counts,
     thresholds_id,
@@ -58,7 +59,9 @@ def cost_panels(comparison):
     ``timing-basis`` (the cx/ecr twins of the scored circuits) is measured only
     when the change can reach translation or optimization, since it repeats the
     cz cases' layout and routing. The multi-seed ``companion`` is measured only
-    when the change can reach layout or routing.
+    when the change can reach layout or routing. Its cases are the scored level-2 case of
+    each ``measurement_protocol.companion_groups`` input group, in that order, when the
+    policy names them; otherwise the historical derivation for the profile.
     """
     cases = comparison.manifest["cases"]
     panels = {
@@ -74,7 +77,11 @@ def cost_panels(comparison):
     if not unknown and not scope & {"translation", "optimization"}:
         panels.pop("timing-basis", None)
     if unknown or scope & {"layout", "routing"}:
-        if comparison.run["profile"] == "confirm-profile":
+        policy = getattr(comparison, "policy", None) or {}
+        groups = (policy.get("measurement_protocol") or {}).get("companion_groups")
+        if groups is not None:
+            companion = [_companion_case(cases, group) for group in groups]
+        elif comparison.run["profile"] == "confirm-profile":
             groups = {
                 c["input_group"]
                 for c in cases
@@ -96,6 +103,17 @@ def cost_panels(comparison):
             ]
         panels["companion"] = (companion, "companion")
     return panels
+
+
+def _companion_case(cases, group):
+    for case in cases:
+        if (
+            case.get("input_group") == group
+            and case.get("role") == "scored"
+            and case.get("optimization_level") == 2
+        ):
+            return case
+    raise HarnessError(f"companion_groups: no scored level-2 case in input group {group!r}")
 
 
 def required_cost_panels(comparison):
@@ -285,8 +303,10 @@ def _measure_rounds(
                     samples[arm][case["case_id"]].append(by_index[index]["samples_ns"])
             continue
         for case in cases:
+            # Companion seeds are the policy's frozen IDs, in its order; samples are
+            # keyed by ``str(seed)``.
             seeds = (
-                list(range(20))
+                companion_seeds(measurement_protocol)
                 if estimator == "companion"
                 else [case.get("timing", {}).get("fixed_seed", 0)]
             )
@@ -440,7 +460,7 @@ def replay_costs(directory, run, manifest, policy, evidence):
         return evidence
     prefix = "CA" if run["profile"] == "confirm-profile" else "IA"
     evidence = list(evidence)
-    comparison = SimpleNamespace(run=run, manifest=manifest)
+    comparison = SimpleNamespace(run=run, manifest=manifest, policy=policy)
     guarded = required_cost_panels(comparison)
     for name, (cases, estimator) in cost_panels(comparison).items():
         id_ = f"{prefix}5/{name}"

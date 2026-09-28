@@ -92,7 +92,7 @@ are not used here.
 | Preset | Pass-manager construction | Measured always; binds only for relevant or unknown scope |
 | Confirm timing | Additional confirm circuits | Confirm profile |
 | Memory | Peak RSS from fresh processes | Confirm profile |
-| Companion | Average timing over seeds 0–19 | Layout, routing or unknown change scope |
+| Companion | Average timing over the policy's `companion_seeds` (confirm 0–9, iterations 0–19) | Layout, routing or unknown change scope |
 
 [Profiles](../README.md#profiles) define the case membership;
 [metrics](../metrics.md#6-cost-time-and-memory) defines every estimator, threshold and
@@ -105,6 +105,21 @@ no per-case breach, it stops there. Otherwise the panel gets a full measurement:
 on iterations or ten on confirm. A candidate-only breach triggers one fresh rerun with twice
 the full count. A repeat breach is `failed`; a clean rerun is `passed_on_rerun`. Companion
 and memory panels have no screen and use their own counts.
+
+**Companion seeds and cases.** `measurement_protocol.companion_seeds` is a list of seed IDs,
+not a count (unique, nonnegative, at least 2). Each companion worker job (one case, one arm,
+one round) runs exactly those IDs in list order; samples are keyed by the seed ID, and a
+case's estimate is the mean over those IDs of each seed's timing median. Every regime needs
+exactly the policy's IDs in both arms of every case: a missing, extra or renamed ID makes the
+bundle `Incomplete`, so it is not reused and `decide` reports it unresolved. The expected IDs
+come from the frozen policy, never from the samples. On LSF the evidence validator requires
+one measured interval per seed per companion worker job (`qtb-lsf-monitor/3` is unchanged).
+A policy without the key (before version 7) uses 0–19, so archived bundles replay as before.
+`measurement_protocol.companion_groups`, when present, names the input groups whose first
+scored level-2 case forms the companion panel, in that order (confirm: G2, G5, G6 and G8).
+Without it, confirm uses the memory panel's groups except `multiplier_h18_n20`, and
+iterations the timing cases whose only mode is `timing_reuse`. `decide` derives the panel
+from the archived policy.
 
 The fixed thresholds are `panel_ratio = 1.10`, `case_ratio = 1.20`, a 25 ms per-case timing
 floor and a 32 MiB memory floor. There is no automatic calibration. Use an [A/A validation
@@ -128,7 +143,7 @@ These are design-probe estimates, not a measured full comparison:
 | Profile | Typical panels | Worst timing path |
 | --- | --- | --- |
 | Iterations | Screen: about 6–7 min; add 10–20 min companion for layout/routing | 22 rounds (screen + full + rerun), about 35 min |
-| Confirm | Screen about 14 min plus memory about 10 min | 34 timing rounds, about 2 h, plus a possible memory rerun |
+| Confirm | Version 7, every screen passing: about 13 min (timing 3, preset 1, confirm-timing 5, memory 4); timing-basis adds about 2.5 and the companion about 6 (unmeasured) when the scope requires them | 34 timing rounds plus a possible memory rerun |
 
 Monitoring aborts a contaminated invocation at its first bad window, usually within
 seconds or minutes. If correctness found a failure, the stage records `skipped` before

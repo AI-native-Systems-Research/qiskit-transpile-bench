@@ -26,6 +26,10 @@ MODES = [
     "api_checks",
 ]
 
+# Seed counts a scored case may use. The paired panel estimator stratifies seeds by case
+# availability; with these counts every stratum (0-49, 50-99) has at least two seeds.
+SCORED_SEED_COUNTS = (50, 100)
+
 
 def data_root():
     installed = Path(str(files("qtb"))) / "data"
@@ -92,14 +96,32 @@ def load_profile(name, root=None, verify=True):
     scored = [c for c in cases if c["role"] == "scored"]
     if not scored or not math.isclose(sum(c["weight"] for c in scored), 1, abs_tol=1e-12):
         raise HarnessError("Scored weights must sum to one")
-    if any(c["seeds_per_block"] != 100 for c in scored):
-        raise HarnessError("Every scored case requires the entire B0 block")
+    unsupported = sorted(
+        c["case_id"] for c in scored if c["seeds_per_block"] not in SCORED_SEED_COUNTS
+    )
+    if unsupported:
+        raise HarnessError(
+            f"Scored cases need seeds_per_block in {SCORED_SEED_COUNTS}, the counts the "
+            f"paired panel estimator supports: {', '.join(unsupported[:5])}"
+            + (f" and {len(unsupported) - 5} more" if len(unsupported) > 5 else "")
+        )
     if name == "confirm-profile" and {c["family"] for c in scored} != {
         f"G{i}" for i in range(1, 9)
     }:
         raise HarnessError("Confirm requires all eight scored families")
     if len(policy["required_ids"]) != len(set(policy["required_ids"])):
         raise HarnessError("Duplicate required constraint ID")
+    # A cost panel without cases is never measured, so a required ID naming it could only
+    # stay unresolved: the required IDs and the panel lists must agree.
+    prefix = "CA" if name == "confirm-profile" else "IA"
+    panels = {c.get("panel") for c in cases}
+    empty = [
+        id_
+        for id_ in policy["required_ids"]
+        if id_.startswith(f"{prefix}5/") and id_.split("/", 1)[1] not in panels
+    ]
+    if empty:
+        raise HarnessError(f"Required cost panels without cases: {', '.join(empty)}")
     if verify:
         checked = set()
         for case in cases:

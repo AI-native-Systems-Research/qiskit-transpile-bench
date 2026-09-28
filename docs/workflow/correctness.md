@@ -30,7 +30,12 @@ rules](../sessions.md) for prerequisites, retries and stage exit codes.
 | C4 | Symbolic parameters and declared numeric bindings |
 | C5 | Scheduling validity |
 | API | Input immutability, pass-manager reuse, batch order and expected errors |
-| C7 | Clifford variants at full width; prefix mode on iterations, prefix and full modes on confirm |
+| C7 | Clifford variants at full width on `clifford_seeds` seeds (iterations 3, confirm 5); prefix mode, plus full mode where `clifford_full_mode` is set (confirm) |
+
+C7 compiles every case, mode and seed as its own worker job and verifies each output as soon
+as it lands, so compiles and verification overlap across the workers: on confirm, 18 cases ×
+2 modes × 5 seeds = 180 outputs per revision. The two settings are policy keys since version
+7; an older policy uses 3 and 10 seeds.
 
 The frozen C1–C5 suite has 480 configurations × 5 seeds = 2,400 compiles per revision. The
 [verifier reference](../verifier.md) explains each oracle, its input domain, tolerances,

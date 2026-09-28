@@ -80,6 +80,25 @@ Because each seed's delta already mixes all cases, the standard error keeps what
 correlation exists between cases and between the two revisions at a shared seed. It does not
 assume independence. Implemented in `paired_panel()`.
 
+**Cases with different seed counts.** A scored case may use 50 or 100 seeds
+(`SCORED_SEED_COUNTS`; the loader refuses others). Each case `c` then uses seeds
+`0..n_c − 1`:
+
+```text
+ln(score) = Σ_c w_c · mean_{s < n_c} d(c, s)        each case over its own seeds
+X_s       = Σ_{c with seed s} w_c · d(c, s) / n_c
+SE²       = Σ_strata n_stratum · sample_var(X_s over the stratum)
+```
+
+Seeds are grouped into strata of identical case availability (0–49 and 50–99 when some cases
+have 50 seeds). Cases that share a seed keep their covariance. With every case at 100 seeds
+there is one stratum and the result is exactly the formula above. A stratum of fewer than two
+seeds, or a missing seed of any case, makes the record `unresolved`; nothing is filled or
+reweighted, and mixed counts alone never make a record unresolved. The report shows a mixed
+panel's seed range ("50–100 per case"), and each panel summary in `decision.json` carries
+`seed_counts` and `strata`. The report-only instance bootstrap resamples seeds within each
+stratum. The shipped profiles still use 100 seeds on every scored case.
+
 **Worked example** (three cases, weights 1/3, four seeds; `tests/test_statistics.py`
 reproduces these digits):
 
@@ -110,7 +129,7 @@ improvement.
 | Improvement, confirm | `ln(D2 score) + 2·SE < ln(0.99)` | `CA2/improvement` (at least 1% practical gain) |
 | Breadth, confirm | ≥ 4 of 8 families with `ln(D2) + 2·SE < 0`, and every leave-one-family-out score < 1 | `CA3/breadth` |
 | Regression guard | `ln(score) ≤ 3·SE` | `N2` of the scored panel, basis panels, confirm family and level summaries |
-| Per-case quality cap | `case_ratio ≤ 1.05` (seed-aggregated, not per seed) | Every scored and guard case, `D2` and `N2` |
+| Per-case quality cap | `case_ratio ≤ 1.05` (seed-aggregated, not per seed); with `quality_cap_rule: noise_aware` a case breaches only when also `ln(case_ratio) > 3·SE_case` | Every scored and guard case, `D2` and `N2` |
 | Per-case SE guard | `ln(case_ratio) ≤ 3·SE_case` | Guard cases outside a basis panel |
 | Exact | Evolved `≤` baseline on every seed | Deterministic cases |
 | Exact zero | Evolved `= 0` | Zero-baseline cases |
@@ -118,6 +137,16 @@ improvement.
 
 The multipliers (2.0 for improvement, 3.0 for guards), the practical ratio and the cap come
 from `policy.json`.
+
+**Cap rule.** `quality_cap_rule` is `plain` in both shipped profiles (and for any policy
+without the key): a case breaches when its ratio exceeds `quality_cap`. `noise_aware` also
+requires `ln(case_ratio) > guard_multiplier · SE_case`, with `SE_case` from the case's paired
+per-seed log differences over the same seed block. It reduces false cap breaches when a
+neutral change decorrelates seed outcomes, at some loss of sensitivity near 1.05; enable it
+only after measuring the false-breach rate and injected 6–10% case-level regressions
+(design/updated_confirm_plan.md, section 7). Under both rules the independent per-case SE
+guard still applies to guard cases outside a basis panel, and each cap record carries
+`cap_rule`.
 
 **Why 3·SE for guards.** A profile has many guards. At 2·SE each would reject a neutral
 candidate about 2.3% of the time, and about 45 guards (confirm) would reject a neutral candidate
@@ -152,7 +181,8 @@ Cost has its own estimators. The quality seed estimator is never applied to cost
 
 ```text
 t(c, arm)     = median over rounds of ( median over timed calls in that round )
-companion     = mean over seeds 0–19 of the above (arithmetic mean: users pay the average)
+companion     = mean over the policy's companion_seeds of the above (arithmetic mean: users
+                pay the average; confirm 0–9, iterations 0–19)
 rss(c, arm)   = median over fresh processes of peak RSS
 ln_panel      = Σ_c u_c · ln( t(c, evolved) / t(c, baseline) )   u_c = 1/|panel|
                 (memory: equal weight per family)
@@ -161,8 +191,8 @@ ln_panel      = Σ_c u_c · ln( t(c, evolved) / t(c, baseline) )   u_c = 1/|pane
 - **Protocol** (`policy.json` → `measurement_protocol`): timing panels are measured in up to
   three regimes, each a fresh session: a `screen_rounds` screen (4), a `timing_rounds` full
   measurement (6 in the iterations profile, 10 in confirm) and a rerun at `rerun_multiplier`
-  times the full count. The companion has 3 rounds per seed and memory 5 processes, each with
-  a doubled rerun and no screen. A timing round is one fresh process per arm that loads,
+  times the full count. The companion has 3 rounds per seed and memory `memory_processes`
+  processes (3 in confirm, 5 in iterations), each with a doubled rerun and no screen. A timing round is one fresh process per arm that loads,
   warms up (`warmups` = 1 call) and times every case of the panel in manifest order, timing
   each until at least `minimum_calls` (2) calls and `minimum_ns` (1 s) have accumulated; the
   companion and memory use one fresh process per arm and case. The two arms (baseline,
@@ -244,6 +274,23 @@ every required ID present and passed              → PASS                  (exi
 otherwise (missing / unresolved)                  → INCONCLUSIVE          (exit 30)
 ```
 
+`verdict()` checks evolved failures before reference failures, so two rules keep a failure
+the candidate did not cause from reading as a violation, without weakening that order:
+
+- **Shared failures.** When both revisions fail C0, C6 or C1-lite on the same case and seed
+  with the same failure witness, the evolved side is not recorded as a failure; the baseline
+  side stays a failed reference record, and the aggregate record stays `unresolved` and names
+  the pair. The verdict is `INCONCLUSIVE`. With both sides merely `unresolved`, a failed
+  improvement record would have given `NO_IMPROVEMENT`. Any other evolved failure stays
+  failed ([quality](workflow/quality.md#failures-both-revisions-share)).
+- **Timeouts.** A candidate quality seed that timed out is `failed` only when it timed out
+  twice (the second time alone, in a fresh process), the same baseline seed completed within
+  half the timeout without a retry, and the host was quiet at both timeouts; otherwise it is
+  `unresolved` ([quality](workflow/quality.md#timeouts)).
+
+In the correctness stage a failed baseline preflight already stops the evolved checks and
+gives `INCONCLUSIVE`.
+
 A missing record can never produce `PASS`. There is no qualification record: a session ends
 `PASS` when every required record passes. A/A runs and the known-outcome mutations remain the
 way to validate the harness on a new runner
@@ -261,4 +308,6 @@ the workflow determines which evidence exists.
 ## Diagnostics that never enter a decision
 
 Total depth, pipeline fingerprints (pass names and search budgets per stage), per-pass times,
-routing SWAP counts from replay, worst seeds and `U_instance` are recorded for review only.
+the pass trace of each quality compile, routing SWAP counts from replay, worst seeds and
+`U_instance` are recorded for review only. (The determinism audit reads the pass trace to
+locate where two compiles of one seed first differ.)

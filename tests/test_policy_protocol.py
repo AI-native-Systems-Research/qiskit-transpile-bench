@@ -121,9 +121,20 @@ def test_policy_and_job_reject_invalid_timing_protocol():
     with pytest.raises(HarnessError, match="minimum_calls"):
         validate("job", bad_job)
     bad_policy = deepcopy(policy)
-    bad_policy["measurement_protocol"]["quality_batch_size"] = 26
+    # A cheap case compiles its whole block of 100 seeds in one batch.
+    bad_policy["measurement_protocol"]["quality_batch_size"] = 101
     with pytest.raises(HarnessError, match="quality_batch_size"):
         validate("policy", bad_policy)
+    for key, value in (("c1_lite_max_width", 26), ("companion_seeds", [1, 1]),
+                       ("audit_fraction", 0)):
+        bad_policy = deepcopy(policy)
+        bad_policy["measurement_protocol"][key] = value
+        with pytest.raises(HarnessError, match=key):
+            validate("policy", bad_policy)
+    for key, value in (("clifford_seeds", 0), ("clifford_full_mode", "yes"),
+                       ("quality_cap_rule", "loose")):
+        with pytest.raises(HarnessError, match=key):
+            validate("policy", dict(policy, **{key: value}))
     for key, value in (("screen_rounds", -1), ("timing_rounds", 0), ("rerun_multiplier", 1)):
         bad_policy = deepcopy(policy)
         bad_policy["measurement_protocol"][key] = value
@@ -151,15 +162,16 @@ def test_policy_and_job_reject_invalid_timing_protocol():
 def test_shipped_profiles_screen_then_measure_at_their_own_full_count():
     from qtb.evaluator.cost import regime_counts
 
-    expected = {"iterations-profile": 6, "confirm-profile": 10}
-    for profile, full in expected.items():
+    expected = {"iterations-profile": (6, 5, 20), "confirm-profile": (10, 3, 10)}
+    for profile, (full, memory, companion) in expected.items():
         _, policy, _ = load_profile(profile, verify=False)
         protocol = policy["measurement_protocol"]
         assert protocol["minimum_calls"] == 2
         assert not any(key.startswith("calibration") for key in protocol)
         assert regime_counts("timing", protocol) == {"screen": 4, "normal": full, "rerun": 2 * full}
         assert regime_counts("companion", protocol) == {"normal": 3, "rerun": 6}
-        assert regime_counts("memory", protocol) == {"normal": 5, "rerun": 10}
+        assert regime_counts("memory", protocol) == {"normal": memory, "rerun": 2 * memory}
+        assert protocol["companion_seeds"] == list(range(companion))
         assert policy["cost_thresholds"] == {
             "panel_ratio": 1.10,
             "case_ratio": 1.20,
@@ -168,3 +180,17 @@ def test_shipped_profiles_screen_then_measure_at_their_own_full_count():
             "screen_fraction": 0.5,
         }
         assert not any(id_.startswith("calibration/") for id_ in policy["required_ids"])
+
+
+def test_a_required_cost_panel_needs_cases(tmp_path):
+    import json
+    import shutil
+
+    root = tmp_path / "data"
+    shutil.copytree(data_root() / "profiles", root / "profiles")
+    path = root / "profiles/confirm-profile/manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["cases"] = [c for c in manifest["cases"] if c.get("panel") != "confirm-timing"]
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(HarnessError, match="CA5/confirm-timing"):
+        load_profile("confirm-profile", root, verify=False)

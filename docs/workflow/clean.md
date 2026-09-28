@@ -31,10 +31,14 @@ is also skipped while a stage the verdict requires has not started.
 - **Deletes:** the evolved build, the source snapshots, the verifier and its cache, `jobs/`
   (every worker's `job.json`, `worker.log` and output circuits, including failing ones),
   `oracle-jobs/`, the copied upstream test trees and their
-  session-local `CARGO_HOME` crates, and verified quality and C6 prefix outputs larger than
-  the policy's `output_retention_bytes` outside `jobs/`.
+  session-local `CARGO_HOME` crates, and verified quality outputs and C6 inputs (the
+  stage-boundary snapshots, or the routing-prefix outputs of sessions before version 7)
+  larger than the policy's `output_retention_bytes` outside `jobs/`. The hash and the job of
+  each deleted C6 input stay in the evidence.
 - **Keeps:** `run.json`, the archived profile, `harness-wheel/`, `stages/`, `evidence.json`,
-  `decision.json`, `report.md`, the logs, `observations.jsonl`, `correctness.jsonl`,
+  `decision.json`, `report.md`, the logs (and the quality batch checkpoints and audit
+  proofs with their copied circuit and snapshot artifacts under `stages/quality/`),
+  `observations.jsonl`, `correctness.jsonl`,
   `clifford.jsonl`, `cost/` (with the monitoring evidence and diagnostics), `changed-tests.json`
   and the snapshot manifests. The LSF records in `<session>.lsf/` are
   outside the session and never cleaned.

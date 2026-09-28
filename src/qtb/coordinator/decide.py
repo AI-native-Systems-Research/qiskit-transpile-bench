@@ -299,7 +299,9 @@ def _decide(root, run, states, hashes, by_stage):
 
         from qtb.coordinator.costs import required_cost_panels
 
-        panels = required_cost_panels(SimpleNamespace(run=run, manifest=manifest))
+        panels = required_cost_panels(
+            SimpleNamespace(run=run, manifest=manifest, policy=policy)
+        )
         required_ids = sorted(set(required_ids) | {f"{prefix}5/{name}" for name in panels})
     if "unit-tests" in required:
         required_ids = sorted(set(required_ids) | {f"{prefix}1/upstream"})

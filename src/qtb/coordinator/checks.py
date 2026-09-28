@@ -9,6 +9,8 @@ Both suites run one revision at a time and report whether every check was decisi
 kept in the store and replayed by later sessions.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 from qtb.canonical import read_circuit, read_json
 from qtb.config import STAGES
 from qtb.coordinator.runlog import step
@@ -17,12 +19,21 @@ from qtb.evaluator import record
 
 # C6 already replays layout and routing exactly on every scored seed. C7's own contribution is
 # translation (and, in full mode, optimization) at full width, which a few seeds exercise as
-# well as ten. Acceptance keeps the wider sample.
+# well as ten. Since version 7 both settings are policy keys (``clifford_seeds``,
+# ``clifford_full_mode``); these constants are the values of policies that predate them.
 CLIFFORD_SEEDS = {"IA": 3, "CA": 10}
 # Full-pipeline C7 runs only in the confirm profile. At levels 2-3, two-qubit resynthesis
 # emits non-Clifford rotation angles, so full outputs rarely verify, and IA1/C7 counts only
 # the prefix. The iterations profile therefore does not pay for full compiles.
 CLIFFORD_FULL_MODE = {"IA": False, "CA": True}
+
+
+def clifford_settings(policy, prefix):
+    """``(seeds, full_mode)`` of C7: the policy's keys, else the pre-version-7 constants."""
+    return (
+        policy.get("clifford_seeds", CLIFFORD_SEEDS[prefix]),
+        policy.get("clifford_full_mode", CLIFFORD_FULL_MODE[prefix]),
+    )
 
 
 def _api_ok(result):
@@ -172,10 +183,12 @@ def behavior_checks(comparison, revisions=("baseline", "evolved")):
 def clifford_checks(comparison, cases, revisions=("baseline", "evolved")):
     """C7 on the Clifford variants; returns whether every result was decisive.
 
+    Every (case, mode, seed) is its own worker job, and its output is verified as soon as
+    it lands, so compiles and verification overlap across the worker pool.
     ``{prefix}1/C7`` covers the prefix-mode checks of both revisions in ``clifford.jsonl``,
-    including baseline rows replayed from the store.
+    including baseline rows replayed from the store; full-mode checks are diagnostics.
     """
-    seeds = range(CLIFFORD_SEEDS[comparison.prefix])
+    count, full = clifford_settings(getattr(comparison, "policy", {}), comparison.prefix)
     modes = (
         ("full", [], STAGES, []),
         (
@@ -185,9 +198,9 @@ def clifford_checks(comparison, cases, revisions=("baseline", "evolved")):
             ["unitary_synthesis"],
         ),
     )
-    if not CLIFFORD_FULL_MODE[comparison.prefix]:
+    if not full:
         modes = tuple(mode for mode in modes if mode[0] != "full")
-    specs, labels = [], []
+    units = []
     for revision in revisions:
         for case in cases:
             if "clifford_variant" not in case:
@@ -199,35 +212,29 @@ def clifford_checks(comparison, cases, revisions=("baseline", "evolved")):
                 options=dict(case["options"], qubits_initially_zero=False),
             )
             for mode, edits, covers, substituted in modes:
-                specs.append((revision, variant, "prefix", seeds, edits))
-                labels.append((revision, case, variant, mode, covers, substituted))
-    with step(comparison, f"compile {len(specs)} Clifford variant jobs"):
-        outputs = comparison.jobs(specs)
-    requests, planned = [], []
-    for (revision, case, variant, mode, covers, substituted), rows in zip(
-        labels, outputs, strict=True
-    ):
-        for output in rows:
-            if output["status"] == "ok":
-                check = len(requests)
-                requests.append(
-                    (
-                        variant,
-                        output,
-                        "C7",
-                        case["clifford_variant"],
-                        {"covers": covers, "substituted": substituted},
-                    )
-                )
-            else:
-                check = {"status": "unverified", "detail": output.get("error")}
-            planned.append((revision, case, mode, output, check))
-    with step(comparison, f"verify {len(requests)} Clifford outputs"):
-        verdicts = comparison.verify_many(requests)
+                for seed in range(count):
+                    units.append((revision, case, variant, mode, edits, covers, substituted, seed))
+
+    def compile_and_verify(unit):
+        revision, case, variant, mode, edits, covers, substituted, seed = unit
+        output = comparison.job(revision, variant, "prefix", [seed], edits)[0]
+        if output["status"] != "ok":
+            return output, {"status": "unverified", "detail": output.get("error")}
+        request = (
+            variant,
+            output,
+            "C7",
+            case["clifford_variant"],
+            {"covers": covers, "substituted": substituted},
+        )
+        return output, comparison.verify_many([request])[0]
+
+    with step(comparison, f"compile and verify {len(units)} Clifford outputs"):
+        with ThreadPoolExecutor(max_workers=comparison.workers) as pool:
+            finished = list(pool.map(compile_and_verify, units))
     decisive = True
-    for revision, case, mode, output, check in planned:
-        if isinstance(check, int):
-            check = verdicts[check]
+    for unit, (output, check) in zip(units, finished, strict=True):
+        revision, case, _, mode, *_ = unit
         check.update(
             case_id=case["case_id"], revision=revision, seed=output["seed"], mode=mode, oracle="C7"
         )

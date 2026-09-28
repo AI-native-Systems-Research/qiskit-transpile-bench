@@ -64,7 +64,29 @@ Do not edit a frozen profile to accept a candidate. Recuration is an explicit ma
 operation using `tools/curate/curate.py`; comparisons consume only frozen artifacts.
 The original RevLib/HWB claims do not transfer to their declared generated replacements.
 
-Both profiles are at version 6. Version 6 relaxed the cost thresholds: `panel_ratio` 1.03 →
+Both profiles are at version 7 (design/updated_confirm_plan.md). Version 7 of the confirm
+profile changes seed blocks, roles, weights and the measurement protocol: `mcx_kg24_n5` at
+levels 1–3 becomes a deterministic case on 10 seeds (G5 weights recomputed),
+`multiplier_h18_n20` L2 goes from 20 to 100 seeds, and confirm-timing from 20 cases to 8. Its
+policy adds `quality_batch_schedule`, `c1_lite_max_width` (22), `quality_timeout`,
+`companion_groups`, `clifford_seeds` (5) and `clifford_full_mode`, sets `companion_seeds` to
+0–9 and `memory_processes` to 3, and names `quality_cap_rule` (`plain`). The iterations policy
+moves its C7 settings into the policy (`clifford_seeds` 3, no full mode) and adds
+`quality_timeout`; its manifest changes only its version. The unimplemented
+design/iterations-quality-coverage-plan.md also claimed version 7 for its expansion; it will
+need version 8.
+
+Every new key is optional in the schema, and a policy without it keeps the rule of version 6:
+the fixed `quality_batch_size`, a C1-lite limit of 25, a candidate timeout that always fails,
+companion seeds 0–19, C7 on 3 (iterations) or 10 (confirm) seeds with full mode on confirm
+only, and the plain cap. `decide` therefore judges an archived version-6 session with its
+own rules. The version-7 harness itself (snapshots from the same compile, the audit's VF2
+rule, shared failures, the pass trace) changes the harness identity, so stored baseline
+quality, correctness and unit-test entries are computed again once for each profile. The
+new batch schedule and C1-lite limit are part of the quality measurement protocol and
+therefore of the confirm quality key as well.
+
+Version 6 relaxed the cost thresholds: `panel_ratio` 1.03 →
 1.10 and `case_ratio` 1.10 → 1.20 (floors and `screen_fraction` unchanged). Cost bundles
 record `thresholds_id`, so bundles measured under version 5 thresholds are not reused.
 

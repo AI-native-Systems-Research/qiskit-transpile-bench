@@ -10,6 +10,31 @@ from qtb.extensions import check_cost_evidence
 # Fallback (screen, normal, rerun) counts when a policy names none.
 COUNTS = {"timing": (0, 10, 20), "companion": (0, 3, 6), "memory": (0, 5, 10)}
 MEASURED_ARMS = ("baseline", "evolved")
+# Companion seed IDs of archived policies (before version 7) that do not name them.
+LEGACY_COMPANION_SEEDS = tuple(range(20))
+
+
+def companion_seeds(protocol=None):
+    """The frozen companion seed IDs of a measurement protocol, in measurement order.
+
+    ``companion_seeds`` is a list of unique nonnegative seed IDs (not a count). A protocol
+    without it is an archived one and keeps the historical seeds 0–19, so old bundles
+    replay unchanged. The expected IDs always come from here, never from the samples.
+    """
+    protocol = protocol or {}
+    if "companion_seeds" not in protocol:
+        return list(LEGACY_COMPANION_SEEDS)
+    seeds = protocol["companion_seeds"]
+    if (
+        not isinstance(seeds, list)
+        or len(seeds) < 2
+        or any(not isinstance(s, int) or isinstance(s, bool) or s < 0 for s in seeds)
+        or len(set(seeds)) != len(seeds)
+    ):
+        raise HarnessError(
+            f"companion_seeds must be at least 2 unique nonnegative integers: {seeds!r}"
+        )
+    return list(seeds)
 
 
 def regime_counts(estimator, protocol=None):
@@ -70,7 +95,12 @@ def thresholds(policy, estimator, regime):
     }
 
 
-def cost_estimate(samples, estimator):
+def cost_estimate(samples, estimator, seeds=None):
+    """One arm's estimate for one case.
+
+    ``seeds`` are the companion seed IDs the policy requires (``companion_seeds``); by
+    default the archived 0–19. A companion sample set with any other IDs is ``Incomplete``.
+    """
     if not samples:
         raise Incomplete("Missing cost samples")
     if estimator == "memory":
@@ -80,14 +110,28 @@ def cost_estimate(samples, estimator):
         if len(values) != len(samples):
             raise Incomplete("Empty timing round")
     elif estimator == "companion":
-        if set(samples) != {str(s) for s in range(20)}:
-            raise Incomplete("Companion requires every seed 0–19")
-        return fmean(cost_estimate(rounds, "timing") for rounds in samples.values())
+        expected = [str(s) for s in (LEGACY_COMPANION_SEEDS if seeds is None else seeds)]
+        if set(samples) != set(expected):
+            raise Incomplete(_seed_mismatch(samples, expected))
+        return fmean(cost_estimate(samples[seed], "timing") for seed in expected)
     else:
         raise HarnessError(f"Unknown cost estimator: {estimator}")
     if any(not math.isfinite(x) or x <= 0 for x in values):
         raise Incomplete("Non-positive or non-finite cost sample")
     return median(values)
+
+
+def _seed_mismatch(samples, expected):
+    missing = sorted(set(expected) - set(samples), key=_seed_order)
+    extra = sorted(set(samples) - set(expected), key=_seed_order)
+    return (
+        f"Companion requires exactly the policy's seed IDs {', '.join(expected)}"
+        f" (missing {missing}, unexpected {extra})"
+    )
+
+
+def _seed_order(seed):
+    return (0, int(seed), "") if seed.isdigit() else (1, 0, seed)
 
 
 def _breached(estimate, baseline, weights, threshold):
@@ -126,15 +170,22 @@ def validate_bundle(bundle, policy, estimator, weights, run_id=None, requirement
     if bundle.get("estimator") != estimator:
         raise Incomplete("Cost bundle estimator does not match the panel")
     count = thresholds(policy, estimator, bundle["regime"])["count"]
+    context = {}
+    if estimator == "companion":
+        seeds = companion_seeds(policy.get("measurement_protocol"))
+        expected = {str(s) for s in seeds}
+        context["seeds"] = seeds
     for arm in arms.values():
         if set(arm["samples"]) != set(weights):
             raise Incomplete("Incomplete cost arm")
         for samples in arm["samples"].values():
+            if estimator == "companion" and set(samples) != expected:
+                raise Incomplete(_seed_mismatch(samples, [str(s) for s in seeds]))
             arrays = samples.values() if estimator == "companion" else [samples]
             if any(len(x) != count for x in arrays):
                 raise Incomplete("Wrong cost sample count")
     check_cost_evidence(
-        requirement, bundle, estimator=estimator, count=count, cases=sorted(weights)
+        requirement, bundle, estimator=estimator, count=count, cases=sorted(weights), **context
     )
 
 
@@ -150,8 +201,16 @@ def cost_guard(bundle, policy, estimator, weights, run_id=None, requirement=None
     validate_bundle(bundle, policy, estimator, weights, run_id, requirement)
     regime = bundle["regime"]
     threshold = thresholds(policy, estimator, regime)
+    seeds = (
+        companion_seeds(policy.get("measurement_protocol"))
+        if estimator == "companion"
+        else None
+    )
     estimates = {
-        arm: {case: cost_estimate(samples, estimator) for case, samples in row["samples"].items()}
+        arm: {
+            case: cost_estimate(samples, estimator, seeds)
+            for case, samples in row["samples"].items()
+        }
         for arm, row in bundle["arms"].items()
     }
     candidate = _breached(estimates["evolved"], estimates["baseline"], weights, threshold)

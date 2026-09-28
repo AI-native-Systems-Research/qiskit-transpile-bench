@@ -1,6 +1,6 @@
 # Plan: a faster confirm profile that passes its own A/A
 
-**Status:** proposal, nothing implemented. 2026-09-28, re-reviewed against harness @`7e59562`, the two manifests and the locally available A/A report. Cluster timings and the earlier probe results have not been independently rerun in this review (see below).
+**Status:** implemented on 2026-09-28 as profile version 7, except W1 (50 seeds; the estimator is ready, the manifest keeps 100 seeds), W3 (timeout unchanged until measured), a second cost worker (section 6 options 1–2, a new monitor contract) and the upstream filing (draft in `design/upstream-vf2postlayout-issue.md`). The cluster validations V3, V6 and V7 (timings and cost noise) are still open; V1, V2, V5, V8 and V9 have local tests. A review of the implementation on the same day found that `VF2Layout` breaks ties as `VF2PostLayout` does; the audit accepts both (section 3, implementation review). Earlier: re-reviewed against harness @`7e59562`, the two manifests and the locally available A/A report.
 
 **Inputs:**
 - the running session `qtb-sessions/qiskit-evolve-0.83`: quality progress log (baseline half, 329 of 1,279 batches after 1h49m at the latest logged snapshot) and its observations;
@@ -131,6 +131,12 @@ Comparing only the used qubits, as finding 11.1 of the iterations plan proposes,
 - Fresh processes with the same `PYTHONHASHSEED` differ as well.
 
 Two consequences: the upstream report (P7) can name a released version, and the CI smoke test below meets the failure without a source build.
+
+**Implementation review (2026-09-28).** Every quality case of the profile was compiled through the implemented checks (`design/probes/audit_tie_probe.py`), with Qiskit 2.5.2 on macOS: a tapped compile with C0 and C6, then an untapped recompile with the audit's comparison, on seeds 0 and 7 of the 209 cases. C0 and C6 verified on every output. What it found:
+- **`VF2Layout` breaks ties as well.** On `queko_bigd_20/tokyo_20` at levels 1 to 3 the first pass whose result differs is `VF2Layout`, which finds a perfect layout there and places the idle qubits differently from run to run. The circuit uses 9 of its 20 qubits. Through the real worker, 58 of 60 recompiles (10 seeds, both arms, three levels) had another layout; the output bytes were the same in all 58, and only idle physical qubits moved. No other case and no other pass differed on these seeds.
+- **Consequence.** An audit that accepts only `VF2PostLayout` leaves these recompiles unresolved. The three cases have 30 rows per revision, and the audit samples 5%: about 3 rows of a session, so a confirm A/A would have ended with `audit/determinism` unresolved in most runs. The audit therefore accepts a difference that starts at `VF2Layout` or at `VF2PostLayout`, with the same proof for both (P3, Q6). Where this plan names `VF2PostLayout` as the pass of the tie, read either pass. The upstream report (P7) should name both.
+- **After the change.** The same probe on four more seeds (1, 13, 42 and 77) of the 209 cases: every difference between a compile and its recompile was proven a tie of one of the two passes, on 29 cases, and C0 and C6 verified on every output. This is a local check with a released Qiskit, not the cluster A/A of V3.
+- **Boundaries on targets without a coupling map.** The six `a2a_*` groups have no routing stage. The tap after `post_routing` still runs there, but the audit's callback sees no pass of that stage and captures no routing boundary. These cases are deterministic (no C6) and run no VF2 pass, so no proof needs that boundary; a scored case on such a target would.
 
 | # | Problem | Cause | Fix |
 | --- | --- | --- | --- |

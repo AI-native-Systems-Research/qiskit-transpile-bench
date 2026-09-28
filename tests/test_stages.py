@@ -216,6 +216,31 @@ def test_a_failed_stage_resumes_and_drops_its_crash_record(world):
     assert verdict(root)[1]["status"] == "PASS"
 
 
+def test_a_quality_retry_derives_its_records_again(world, monkeypatch):
+    """The failure record of a seed that the retry compiled does not survive the retry."""
+    root, _ = compile_(world)
+    quality, attempts = Comparison.quality, []
+
+    def crashes_once(self, cases):
+        attempts.append(self.stage)
+        rows = quality(self, cases)
+        if len(attempts) == 1:
+            self.evidence(record("failure/a-seed", "completeness", "failed", "reference"))
+            raise HarnessError("killed after a seed failed")
+        return rows
+
+    monkeypatch.setattr(Comparison, "quality", crashes_once)
+    assert run_stage(root, "quality", progress=QUIET) == 40
+    evidence = read_json(root / "stages/quality/evidence.json")
+    assert {"failure/a-seed", "harness/error/quality"} <= {r["id"] for r in evidence}
+    assert run_stage(root, "quality", progress=QUIET) == 0
+    evidence = read_json(root / "stages/quality/evidence.json")
+    assert [r["id"] for r in evidence] == [
+        "audit/determinism", "IA1/C0", "IA1/C6", "IA6/completeness"
+    ]
+    assert read_state(root, "quality")["gate"] == "improved"
+
+
 def test_a_killed_stage_resumes(world):
     root, _ = compile_(world)
     run_stage(root, "quality", progress=QUIET)
@@ -569,7 +594,7 @@ def test_a_missing_store_entry_stops_later_stages(world):
 def test_version_five_policies_need_no_qualification():
     for profile in ("iterations-profile", "confirm-profile"):
         manifest, policy, _ = load_profile(profile, verify=False)
-        assert policy["version"] == manifest["version"] == 6
+        assert policy["version"] == manifest["version"] == 7
         assert "harness/qualification" not in policy["required_ids"]
         assert not any(i.endswith("1/upstream") for i in policy["required_ids"])
         assert "qualification" not in policy and "status" not in manifest

@@ -3,7 +3,7 @@
 [Documentation index](README.md)
 
 The implementation originated from `design/transpilation-benchmark-impl-plan.md`; the
-README describes the current CLI. Both profiles are version 6. There is no qualification
+README describes the current CLI. Both profiles are version 7. There is no qualification
 step: a session can end `PASS` when every required record passes. Validating the harness on a
 new runner is a practice, described below, not a required record. A successful `compile` is
 not a validation. Numerical examples and synthetic acceptance-path tests are harness tests,
@@ -42,7 +42,8 @@ not measurements of an evolved Qiskit revision.
 - C1-lite eligibility based on the reference/output union, and binding baseline-owned test
   execution.
 - One-pass structural metrics/hash/legality, `clean` pruning of verified outputs above 8 MB,
-  runner-wide exclusion of quality jobs during cost measurements, and batched routing prefixes.
+  runner-wide exclusion of quality jobs during cost measurements, and C6 snapshots taken
+  from the quality compile itself.
 - CI and an opt-in controlled-runner workflow with archived evidence.
 - LSF orchestration under `lsf/`: a launcher, a manager job that runs every stage as its own
   job with fixed allocations, a durable ledger with restart-safe cost retries (one initial job
@@ -163,10 +164,12 @@ find out whether a `PASS` on a given runner can be trusted.
   forms. It does not silently decompose high-level inputs to make a revision compatible.
   Angle-bound targets use an explicit, checked Qiskit state adapter because 2.5.2 has no
   public getter for the numeric bounds.
-- Quality orchestration runs up to 9 seed batches at once (each batch is one quality job and
-  its two routing prefixes). Input roundtrip and the determinism audit also run concurrently.
-  The C0/C6 checks of each batch run in the coordinator process and are bound by the GIL.
-  Runtime and memory budgets still need measurement on the intended controlled runner.
+- Quality orchestration runs up to 15 tasks at once (compiles, checks in harness processes,
+  audit recompiles and C1-lite verification). The version-7 stage targets (45 minutes for
+  quality, 20 for correctness, 20 for cost when the screens pass) are model estimates; they
+  still need measurement on the cluster (design/updated_confirm_plan.md, V3–V7). So do the
+  quality timeout's load threshold, the C1-lite verifier time at 22 wires and the trimmed cost
+  panels' noise and sensitivity.
 - Sessions are not pruned automatically, apart from the Rust `target/` directories of each
   build and test run. `clean` removes a decided session's builds,
   verifier, caches and test copies, and replaces verified outputs above 8 MB with a hash
@@ -204,7 +207,37 @@ dropping a Clifford `cz` must yield a C7 mismatch and `CONSTRAINT_VIOLATION`;
 adding a non-Clifford `rz(0.001)` must yield C7 unverified and `INCONCLUSIVE`.
 It also tests archived-observation replay with a scaled guard regression, cost-panel
 restart after an incomplete bundle, Qiskit self-grading overrides, and the bypass of
-stored baseline quality rows for identical builds. These tests use small circuits or
+stored baseline quality rows for identical builds.
+
+Version 7 adds (`tests/test_confirm_aa_smoke.py`, `tests/test_quality_checks.py`,
+`tests/test_snapshot_taps.py`, `tests/test_worker_storage.py`):
+
+- a confirm A/A smoke run through the real worker, check processes and verifier: the five
+  groups where C6 used to fail (`qaoa_complete_n32`, `qft_full_n32`, `qv_n14_d14_s10`,
+  `qft_cp_n8`, `qv_n50_d20`) at levels 1 and 2 on 10 seeds; C0, C6, C1-lite, completeness
+  and the audit must pass. A second run audits every seed of `queko_bigd_20/tokyo_20` at
+  levels 1 and 2, where VF2Layout places the idle qubits differently on nearly every
+  recompile;
+- the audit's VF2 rule: a proven permutation passes, at VF2PostLayout and at VF2Layout; a
+  changed operation with equal `D2` and `N2`, a changed parameter or global phase,
+  inconsistent final mappings, a difference that starts at another pass or in the DAG, and
+  missing trace evidence stay unresolved;
+- the taps: a tapped compile has the output, layout, fingerprint and pass trace of an
+  untapped one; a tap follows an existing post-stage hook; the snapshots equal the former
+  prefix exports, with an elided permutation and ancillas; a capture or export that fails
+  leaves the output alone and C6 unverified; a pass that only shares the tap's name stays in
+  the fingerprint and the trace;
+- shared failures: a failure both revisions share gives `INCONCLUSIVE`; a candidate-only
+  failure on another seed of the same case, and a different failure with the same generic
+  status and reason on the same seed, stay `CONSTRAINT_VIOLATION`; a dropped SWAP is a C6
+  mismatch;
+- snapshots against the former routing-prefix exports, timeout retry and classification,
+  and the C1-lite pair rules at the 22-wire limit.
+
+Measured locally with Qiskit 2.5.2 (macOS), `qaoa_complete_n32/rochester_53` at levels 1
+and 2 and `qft_cp_n8/melbourne_14_u` at level 2: every audited difference on seeds 0–11 (36
+of 36, including the seeds where virtual qubit 31 moves and the output bytes change) was
+proven a VF2 tie, with C6 verified on the recompile's own snapshots. These tests use small circuits or
 synthetic observations; they do not validate a runner or a frozen profile.
 
 The plan's section 11 A/A end-to-end check still requires a controlled runner and two
@@ -214,9 +247,13 @@ the quality gate is `aa`, so `correctness` and `cost` run as a check of the harn
 stored baseline quality, correctness or unit-test results are reused. Inspect the
 `build.json` files (the baseline's in its store entry, the evolved one's in
 `builds/evolved-build/`) to confirm independent baseline and evolved wheel builds, then
-compare every B0 observation by case and seed: output hashes, `D2`, and `N2` must match
-exactly; every paired delta must be zero. Check that no observation carries `cached_from`,
-the determinism audit passed, and the final decision is `NO_IMPROVEMENT`. Cost arms must
+compare every B0 observation by case and seed: `D2` and `N2` must match exactly, so every
+paired delta is zero. Output hashes must match too, except on targets without error rates,
+where VF2PostLayout and VF2Layout break ties differently from run to run; there the outputs
+of a seed may differ by a physical-wire permutation, which the determinism audit proves
+wherever it samples one. Check that no observation carries `cached_from`, the determinism audit passed, the
+quality gate is `aa`, every stage completed, and the final decision is `NO_IMPROVEMENT` with no
+failed or unresolved record other than improvement records. Cost arms must
 have distinct arm IDs even when their build identities match. Keep the session directory
 and the controlled-runner configuration as the validation evidence.
 

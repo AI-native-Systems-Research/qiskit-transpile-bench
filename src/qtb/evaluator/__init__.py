@@ -92,10 +92,8 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
         try:
             if not panel_valid:
                 raise Incomplete("Round-trip or determinism audit evidence is missing")
-            seeds = list(range(subset[0]["seeds_per_block"]))
-            if any(c["seeds_per_block"] != len(seeds) for c in subset):
-                raise Incomplete("Mixed seed counts inside a panel")
-            result = paired_panel(subset, observations, metric, seeds, weights)
+            # Each case uses its own seeds 0..seeds_per_block-1; the estimator stratifies.
+            result = paired_panel(subset, observations, metric, None, weights)
             limit = math.log(policy["practical_ratio"]) if improvement else 0
             ok = (
                 result["ln_score"] + policy["improvement_multiplier"] * result["SE"] < limit
@@ -132,6 +130,12 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
                     metric,
                     weights={c["case_id"]: 1 / len(subset) for c in subset},
                 )
+    # plain: a case breaches when its ratio exceeds quality_cap. noise_aware: only when its
+    # log ratio also exceeds guard_multiplier paired SEs of the same seed block. Archived
+    # policies without the key keep the plain rule.
+    cap_rule = policy.get("quality_cap_rule", "plain")
+    if cap_rule not in {"plain", "noise_aware"}:
+        raise HarnessError(f"Unknown quality_cap_rule {cap_rule!r}")
     for case in positive:
         for metric in ("D2", "N2"):
             id_ = f"{prefix}4/cap/{case['case_id']}/{metric}"
@@ -146,9 +150,13 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
                     list(range(case["seeds_per_block"])),
                     {case["case_id"]: 1},
                 )
-                ok = result["score"] <= policy["quality_cap"]
+                noise = result["ln_score"] > policy["guard_multiplier"] * result["SE"]
+                breach = result["score"] > policy["quality_cap"]
+                if cap_rule == "noise_aware":
+                    breach = breach and noise
+                ok = not breach
                 if case["role"] == "guard" and not case.get("panel"):
-                    ok &= result["ln_score"] <= policy["guard_multiplier"] * result["SE"]
+                    ok &= not noise
                 records.append(
                     record(
                         id_,
@@ -156,6 +164,7 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
                         "passed" if ok else "failed",
                         value=result["score"],
                         SE=result["SE"],
+                        cap_rule=cap_rule,
                     )
                 )
                 summaries[id_] = result
@@ -215,7 +224,7 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
 
         def report_summary(name, subset, metric):
             try:
-                result = paired_panel(subset, observations, metric, list(range(100)))
+                result = paired_panel(subset, observations, metric)
             except (Incomplete, HarnessError) as exc:
                 summaries[name] = {"status": "unavailable", "reason": str(exc)}
                 return None
@@ -261,8 +270,10 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
         summaries["instance_bootstrap"] = cluster_bootstrap(
             scored, objective, policy["bootstrap_replicates"], policy["rng_seed"]
         )
+        # Report-only: the score without the groups the iterations profile scores.
         rest = [c for c in scored if c["input_group"] not in policy["iterations_groups"]]
         report_summary("leave_iterations_out", rest, "D2")
+        report_summary("leave_iterations_out/N2", rest, "N2")
     elif confirm:
         required.add("CA3/breadth")
     return records, sorted(required), summaries

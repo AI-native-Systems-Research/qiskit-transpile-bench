@@ -603,7 +603,12 @@ def compile_options(case, target, seed):
     return options
 
 
-def preset(case, target, seed, edits=()):
+def preset(case, target, seed, edits=(), taps=None):
+    """The case's preset pass manager with ``edits`` applied.
+
+    ``tap:<stage>`` edits append a ``SnapshotTap`` after the stage's post hook; pass a dict
+    as ``taps`` to receive them by stage. A tap never changes the compile.
+    """
     from qiskit.transpiler import CouplingMap
     from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
@@ -613,7 +618,7 @@ def preset(case, target, seed, edits=()):
     for edit in edits:
         if edit == "unitary_synthesis_method=clifford":
             options["unitary_synthesis_method"] = "clifford"
-        elif not edit.startswith("drop_stage:"):
+        elif not edit.startswith(("drop_stage:", "tap:")):
             raise Unsupported(f"Unknown pipeline edit {edit}")
     pm = generate_preset_pass_manager(**options)
     for edit in edits:
@@ -623,7 +628,170 @@ def preset(case, target, seed, edits=()):
                 raise Unsupported(f"Unknown pipeline stage {stage}")
             for attr in (stage, f"pre_{stage}", f"post_{stage}"):
                 setattr(pm, attr, None)
+    for edit in edits:
+        if edit.startswith("tap:"):
+            stage = edit.split(":", 1)[1]
+            tap = add_tap(pm, stage)
+            if taps is not None:
+                taps[stage] = tap
     return pm
+
+
+def error_text(exc):
+    return f"{type(exc).__name__}: {exc}"
+
+
+@lru_cache(maxsize=1)
+def _snapshot_tap_class():
+    from qiskit.transpiler.basepasses import AnalysisPass
+
+    class SnapshotTap(AnalysisPass):
+        """Freeze the DAG and layout state at a stage boundary; changes nothing.
+
+        The circuit is a copy and the layout is exported to plain lists at once, so later
+        passes cannot mutate what was captured. A capture that fails is recorded in
+        ``error`` and never fails the compile: C6 is then unverified for that seed.
+        """
+
+        def __init__(self, stage):
+            super().__init__()
+            self.stage = stage
+            self.captured = None
+            self.error = None
+
+        def run(self, dag):
+            try:
+                self.captured = capture_state(dag, self.property_set)
+            except Exception as exc:
+                self.error = error_text(exc)
+
+    return SnapshotTap
+
+
+def is_tap(pass_):
+    """Whether ``pass_`` is a harness tap: by class, so a pass of that name is not one."""
+    return isinstance(pass_, _snapshot_tap_class())
+
+
+def add_tap(pm, stage):
+    """Append a snapshot tap after ``post_<stage>``, keeping any existing hook in front."""
+    from qiskit.transpiler import PassManager
+
+    if stage not in pm.stages:
+        raise Unsupported(f"Cannot tap unknown pipeline stage {stage}")
+    tap = _snapshot_tap_class()(stage)
+    hook = getattr(pm, f"post_{stage}")
+    if hook is None:
+        hook = PassManager([tap])
+    else:
+        hook.append(tap)
+    # StagedPassManager rebuilds its task list on assignment only.
+    setattr(pm, f"post_{stage}", hook)
+    return tap
+
+
+def capture_state(dag, property_set):
+    """A copy of ``dag`` as a circuit with its ``TranspileLayout``, and that layout exported.
+
+    Reads the property set exactly as the pass manager does at the end of a run
+    (``TranspileLayout.from_property_set``), which does not mutate it.
+    """
+    from qiskit.converters import dag_to_circuit
+    from qiskit.transpiler.layout import TranspileLayout
+
+    circuit = dag_to_circuit(dag, copy_operations=True)
+    layout = TranspileLayout.from_property_set(dag, property_set)
+    if layout is not None:
+        circuit._layout = layout
+    input_width = property_set["num_input_qubits"]
+    if input_width is None:
+        input_width = circuit.num_qubits
+    return circuit, export_layout(circuit, input_width)
+
+
+def pass_stages(pm):
+    """``{id(pass): stage}`` for every pass of a staged pass manager, pre/post hooks folded."""
+    stages = {}
+
+    def walk(controller, stage):
+        tasks = getattr(controller, "tasks", None)
+        if tasks is None:
+            stages[id(controller)] = stage
+            return
+        for task in tasks:
+            walk(task, stage)
+
+    for name in pm.expanded_stages:
+        stage_pm = getattr(pm, name)
+        if stage_pm is not None:
+            walk(stage_pm.to_flow_controller(), name.removeprefix("pre_").removeprefix("post_"))
+    return stages
+
+
+def layout_digest(dag, property_set):
+    """Digest of the layout-carrying property-set fields, by qubit index."""
+    from qtb.canonical import digest
+
+    original = property_set["original_qubit_indices"] or {}
+
+    def index(bit):
+        if bit in original:
+            return original[bit]
+        try:
+            return ["dag", dag.find_bit(bit).index]
+        except Exception:
+            return None
+
+    fields = {}
+    for key in ("layout", "post_layout", "final_layout", "virtual_permutation_layout"):
+        layout = property_set[key]
+        if layout is None:
+            fields[key] = None
+            continue
+        fields[key] = sorted(
+            ([index(bit), physical] for physical, bit in layout.get_physical_bits().items()),
+            key=repr,
+        )
+    return digest(fields)
+
+
+class Recorder:
+    """A read-only ``PassManager.run`` callback.
+
+    It records one trace entry per executed pass (pass name, stage, DAG size and a digest of
+    the layout fields), which locates the first pass at which two compiles differ. With
+    ``boundaries`` it also captures the state after the last executed pass of each named
+    stage, as a ``SnapshotTap`` there would, without adding passes to the pipeline.
+
+    It never fails the compile it observes. An entry that cannot be computed is recorded
+    as ``[pass, stage, None, "error: ..."]``, which equals no entry of another compile; a
+    boundary that cannot be captured is dropped and named in ``errors``.
+    """
+
+    def __init__(self, pm, boundaries=()):
+        self.stages = pass_stages(pm)
+        self.boundaries = set(boundaries)
+        self.trace = []
+        self.captured = {}
+        self.errors = {}
+
+    def __call__(self, **kwargs):
+        pass_, dag, property_set = kwargs["pass_"], kwargs["dag"], kwargs["property_set"]
+        if is_tap(pass_):
+            return  # instrumentation: tapped and untapped traces must compare equal
+        name, stage = type(pass_).__name__, self.stages.get(id(pass_))
+        try:
+            self.trace.append([name, stage, dag.size(), layout_digest(dag, property_set)])
+        except Exception as exc:
+            self.trace.append([name, stage, None, f"error: {error_text(exc)}"])
+        if stage in self.boundaries:
+            # The state after an earlier pass of the stage is not its boundary.
+            self.captured.pop(stage, None)
+            self.errors.pop(stage, None)
+            try:
+                self.captured[stage] = capture_state(dag, property_set)
+            except Exception as exc:
+                self.errors[stage] = error_text(exc)
 
 
 def fingerprint(pm):
@@ -640,6 +808,8 @@ def fingerprint(pm):
     def walk(controller):
         passes = getattr(controller, "tasks", None)
         if passes is None:
+            if is_tap(controller):
+                return []  # harness instrumentation, not part of the candidate's pipeline
             return [
                 {
                     "pass": type(controller).__name__,

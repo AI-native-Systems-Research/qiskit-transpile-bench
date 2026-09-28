@@ -422,3 +422,222 @@ def test_cost_replay_ignores_claimed_pass_without_fresh_rerun(tmp_path):
     write_json(tmp_path / "cost/timing/rerun.json", stale)
     result = replay_costs(tmp_path, run, {"cases": [case]}, UNSCREENED, forged)
     assert result[0]["result"] == "unresolved" and "fresh session" in result[0]["detail"]
+
+
+# The companion seed-ID list (``measurement_protocol.companion_seeds``).
+
+SPARSE = [0, 3, 7, 11]
+SEEDED = deepcopy(POLICY)
+SEEDED["measurement_protocol"]["companion_seeds"] = SPARSE
+
+
+def test_companion_seeds_come_from_the_policy_and_archives_keep_0_to_19():
+    from qtb.evaluator.cost import companion_seeds
+
+    assert companion_seeds(POLICY["measurement_protocol"]) == list(range(20))
+    assert companion_seeds(None) == list(range(20))
+    assert companion_seeds(SEEDED["measurement_protocol"]) == SPARSE
+    assert companion_seeds({"companion_seeds": [9, 2]}) == [9, 2]  # order is kept
+    for bad in ([], [1], [1, 1], [0, -1], [0, 1.0], [0, True], 10, "0,1"):
+        with pytest.raises(HarnessError, match="companion_seeds"):
+            companion_seeds({"companion_seeds": bad})
+
+
+def companion_worker(monkeypatch, calls, ratio=1.0):
+    from qtb.coordinator import costs
+
+    def worker(build, job, directory):
+        calls.append((build["id"], list(job["seeds"])))
+        scale = ratio if build["id"] == "evolved" else 1.0
+        return [
+            {"seed": seed, "status": "ok", "samples_ns": [int(10**9 * scale)]}
+            for seed in job["seeds"]
+        ]
+
+    monkeypatch.setattr(costs, "run_worker", worker)
+    monkeypatch.setattr(costs.os, "getloadavg", lambda: (0, 0, 0))
+
+
+COMPANION_CASE = {
+    "case_id": "c", "panel": "timing", "timeout_s": 120, "modes": ["timing_reuse"],
+}
+BUILDS = {arm: {"id": arm} for arm in ("baseline", "evolved")}
+
+
+def test_a_noncontiguous_seed_list_is_measured_and_judged_by_its_ids(monkeypatch, tmp_path):
+    from qtb.coordinator import costs
+
+    calls = []
+    companion_worker(monkeypatch, calls)
+    result = costs.measure_panel(
+        {"run_id": "run", "machine": {}}, BUILDS, [COMPANION_CASE], "companion",
+        tmp_path / "cost/companion", tmp_path, SEEDED,
+    )
+    assert (result["result"], result["regime"], result["count"]) == ("passed", "normal", 3)
+    assert len(calls) == 3 * 2 and all(seeds == SPARSE for _, seeds in calls)
+    saved = read_json(tmp_path / "cost/companion/normal.json")
+    for arm in BUILDS:
+        samples = saved["arms"][arm]["samples"]["c"]
+        assert set(samples) == {"0", "3", "7", "11"}  # saved with sorted keys
+        assert all(len(rounds) == 3 for rounds in samples.values())
+    validate_bundle(saved, SEEDED, "companion", {"c": 1.0}, "run")
+    assert cost_guard(saved, SEEDED, "companion", {"c": 1.0}, "run")["result"] == "passed"
+    # The same bundle is not the archived 0-19 protocol, nor 0..3 by position.
+    with pytest.raises(Incomplete, match="seed IDs"):
+        validate_bundle(saved, POLICY, "companion", {"c": 1.0}, "run")
+    contiguous = deepcopy(SEEDED)
+    contiguous["measurement_protocol"]["companion_seeds"] = [0, 1, 2, 3]
+    with pytest.raises(Incomplete, match="seed IDs"):
+        validate_bundle(saved, contiguous, "companion", {"c": 1.0}, "run")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda s: s.pop("7"),  # a missing seed
+        lambda s: s.update({"12": s["11"]}),  # an unexpected seed
+        lambda s: s.update({"12": s.pop("11")}),  # the same count, the wrong ID
+    ],
+)
+def test_missing_or_unexpected_seed_ids_are_incomplete(monkeypatch, tmp_path, change):
+    from qtb.coordinator import costs
+
+    companion_worker(monkeypatch, [])
+    measured = costs.collect_panel(
+        {"run_id": "run", "machine": {}}, BUILDS, [COMPANION_CASE], "companion",
+        tmp_path, 3, list(BUILDS), tmp_path, SEEDED["measurement_protocol"],
+    )
+    measured.update(regime="normal", thresholds_id=thresholds_id(SEEDED))
+    validate_bundle(measured, SEEDED, "companion", {"c": 1.0}, "run")
+    change(measured["arms"]["evolved"]["samples"]["c"])
+    with pytest.raises(Incomplete, match="seed IDs"):
+        validate_bundle(measured, SEEDED, "companion", {"c": 1.0}, "run")
+    with pytest.raises(Incomplete, match="seed IDs"):
+        cost_guard(measured, SEEDED, "companion", {"c": 1.0}, "run")
+    with pytest.raises(Incomplete, match="seed IDs"):
+        cost_estimate(measured["arms"]["evolved"]["samples"]["c"], "companion", SPARSE)
+
+
+def test_cost_estimate_requires_exactly_the_given_seed_ids():
+    samples = {str(s): [[s + 1]] * 3 for s in SPARSE}
+    assert cost_estimate(samples, "companion", SPARSE) == (1 + 4 + 8 + 12) / 4
+    with pytest.raises(Incomplete):
+        cost_estimate(samples, "companion")  # the archived default is 0-19
+    with pytest.raises(Incomplete):
+        cost_estimate(samples, "companion", [0, 1, 2, 3])
+    with pytest.raises(Incomplete):
+        cost_estimate(samples, "companion", [*SPARSE, 12])
+    with pytest.raises(Incomplete):
+        cost_estimate(dict(samples, **{"12": [[1]] * 3}), "companion", SPARSE)
+
+
+def test_monitored_admission_gets_the_policy_seed_list(tmp_path, monkeypatch):
+    import sys
+
+    (tmp_path / "seen_extension.py").write_text(
+        "CONTRACT = 'test-contract/1'\n"
+        "SEEN = []\n"
+        "def validate(bundle, requirement, **context):\n"
+        "    SEEN.append(context)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "seen_extension", raising=False)
+    requirement = {"contract": "test-contract/1", "validator": "seen_extension:validate"}
+    companion_worker(monkeypatch, [])
+    from qtb.coordinator import costs
+
+    measured = costs.collect_panel(
+        {"run_id": "run", "machine": {}}, BUILDS, [COMPANION_CASE], "companion",
+        tmp_path / "m", 3, list(BUILDS), tmp_path, SEEDED["measurement_protocol"],
+    )
+    measured.update(regime="normal", thresholds_id=thresholds_id(SEEDED))
+    validate_bundle(measured, SEEDED, "companion", {"c": 1.0}, "run", requirement)
+    assert sys.modules["seen_extension"].SEEN == [
+        {"estimator": "companion", "count": 3, "cases": ["c"], "seeds": SPARSE}
+    ]
+
+
+def companion_replay(tmp_path, policy):
+    from qtb.coordinator.costs import replay_costs
+
+    run = dict(
+        profile="iterations-profile", run_id="run", builds=BUILDS,
+        scope={"2": {"stages": ["routing"]}},
+    )
+    return replay_costs(tmp_path, run, {"cases": [COMPANION_CASE]}, policy, [])
+
+
+def test_archived_policy_replays_a_20_seed_companion_bundle_unchanged(monkeypatch, tmp_path):
+    from qtb.coordinator import costs
+
+    archived = deepcopy(POLICY)
+    assert "companion_seeds" not in archived["measurement_protocol"]
+    for ratio, expected in ((1.0, "passed"), (1.3, "failed")):
+        calls = []
+        companion_worker(monkeypatch, calls, ratio)
+        directory = tmp_path / f"ratio-{ratio}"
+        measured = costs.measure_panel(
+            {"run_id": "run", "machine": {}}, BUILDS, [COMPANION_CASE], "companion",
+            directory / "cost/companion", tmp_path, archived,
+        )
+        assert measured["result"] == expected
+        assert all(seeds == list(range(20)) for _, seeds in calls)
+        replayed = [r for r in companion_replay(directory, archived) if r["id"] == "IA5/companion"]
+        assert replayed[0]["result"] == expected
+        assert replayed[0]["candidate"] == measured["candidate"]
+        # A version-7 policy freezing the same 20 IDs judges the archive the same way...
+        explicit = deepcopy(archived)
+        explicit["measurement_protocol"]["companion_seeds"] = list(range(20))
+        again = [r for r in companion_replay(directory, explicit) if r["id"] == "IA5/companion"]
+        assert again[0]["result"] == expected
+        # ...while a policy with other IDs never reuses it.
+        explicit["measurement_protocol"]["companion_seeds"] = list(range(10))
+        other = [r for r in companion_replay(directory, explicit) if r["id"] == "IA5/companion"]
+        assert other[0]["result"] == "unresolved" and "seed IDs" in other[0]["detail"]
+
+
+def confirm_cases():
+    cases = []
+    for group in ("g1", "g2", "g3", "multiplier_h18_n20"):
+        for level in (0, 2):
+            cases.append(
+                {
+                    "case_id": f"{group}-L{level}", "input_group": group, "role": "scored",
+                    "optimization_level": level,
+                }
+            )
+        cases.append(
+            {"case_id": f"{group}-guard", "input_group": group, "role": "guard",
+             "optimization_level": 2}
+        )
+        cases.append(
+            {"case_id": f"{group}-mem", "input_group": group, "panel": "memory",
+             "role": "scored", "optimization_level": 1}
+        )
+    return cases
+
+
+def test_companion_groups_select_the_listed_level_2_scored_cases_in_order():
+    from types import SimpleNamespace
+
+    from qtb.coordinator.costs import cost_panels, required_cost_panels
+
+    run = {"profile": "confirm-profile", "scope": {"2": {"stages": ["routing"]}}}
+    manifest = {"cases": confirm_cases()}
+
+    def companion(**policy):
+        namespace = SimpleNamespace(run=run, manifest=manifest, **policy)
+        cases, estimator = cost_panels(namespace)["companion"]
+        assert estimator == "companion"
+        assert "companion" in required_cost_panels(namespace)
+        return [c["case_id"] for c in cases]
+
+    legacy = ["g1-L2", "g2-L2", "g3-L2"]
+    assert companion() == legacy  # no policy on the namespace
+    assert companion(policy=POLICY) == legacy  # no companion_groups
+    listed = deepcopy(POLICY)
+    listed["measurement_protocol"]["companion_groups"] = ["g3", "multiplier_h18_n20", "g1"]
+    assert companion(policy=listed) == ["g3-L2", "multiplier_h18_n20-L2", "g1-L2"]
+    listed["measurement_protocol"]["companion_groups"] = ["g2", "nowhere"]
+    with pytest.raises(HarnessError, match="nowhere"):
+        companion(policy=listed)

@@ -8,7 +8,9 @@ from pathlib import Path
 from qtb.canonical import digest, file_hash, read_circuit, read_json, verify_artifact, write_circuit
 from qtb.errors import HarnessError
 from qtb_worker.adapter import (
+    Recorder,
     compile_options,
+    error_text,
     export_circuit,
     export_layout,
     export_target,
@@ -92,19 +94,30 @@ def run_seed(job, seed, outdir, inputs):
         }
     if mode in {"quality", "prefix", "diagnostics"}:
         compile_start = time.perf_counter_ns()
-        pm = preset(case, target, seed, job.get("pipeline_edits", []))
+        taps = {}
+        pm = preset(case, target, seed, job.get("pipeline_edits", []), taps)
         trace = []
+        # Read-only callbacks: the pass trace, and boundary snapshots without tap passes.
+        recorder = (
+            Recorder(pm, job.get("capture", []))
+            if job.get("trace") or job.get("capture")
+            else None
+        )
 
         def callback(**kwargs):
-            trace.append(
-                {
-                    "pass": type(kwargs["pass_"]).__name__,
-                    "seconds": kwargs["time"],
-                    "count": kwargs["count"],
-                }
-            )
+            if mode == "diagnostics":
+                trace.append(
+                    {
+                        "pass": type(kwargs["pass_"]).__name__,
+                        "seconds": kwargs["time"],
+                        "count": kwargs["count"],
+                    }
+                )
+            if recorder is not None:
+                recorder(**kwargs)
 
-        output = pm.run(circuit, **({"callback": callback} if mode == "diagnostics" else {}))
+        watched = mode == "diagnostics" or recorder is not None
+        output = pm.run(circuit, **({"callback": callback} if watched else {}))
         compile_ns = time.perf_counter_ns() - compile_start
         result = save_output(
             output,
@@ -118,6 +131,34 @@ def run_seed(job, seed, outdir, inputs):
             result["start_times_dt"] = list(output.op_start_times)
         if trace:
             result["diagnostics"] = trace
+        if recorder is not None and job.get("trace"):
+            result["trace"] = recorder.trace
+        captured = {stage: tap.captured for stage, tap in taps.items()}
+        errors = {stage: tap.error for stage, tap in taps.items() if tap.error}
+        if recorder is not None:
+            captured.update(recorder.captured)
+            errors.update(recorder.errors)
+        if captured:
+            result["snapshots"] = {}
+            for stage, state in sorted(captured.items()):
+                if state is None:
+                    continue  # the tap never ran: C6 stays unverified
+                snapshot, layout = state
+                try:
+                    saved = save_output(
+                        snapshot,
+                        circuit.num_qubits,
+                        outdir / f"snapshot-{seed}-{stage}.ops.jsonl.gz",
+                        opaque=bool(snapshot.parameters),
+                    )
+                except Exception as exc:
+                    # The output stands; only C6 loses its input and stays unverified.
+                    errors[stage] = error_text(exc)
+                    continue
+                # The layout was exported when the state was captured.
+                result["snapshots"][stage] = dict(saved, layout=layout)
+        if errors:
+            result["snapshot_errors"] = errors
         if output.parameters:
             result["free_parameters"] = sorted(p.name for p in output.parameters)
             result["bindings"] = []

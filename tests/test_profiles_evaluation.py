@@ -1,4 +1,6 @@
 import copy
+import math
+import random
 
 import pytest
 
@@ -46,12 +48,14 @@ def synthetic(profile="iterations-profile", ratio=0.97):
 def test_confirm_manifest_weight_contract():
     manifest, _, _ = load_profile("confirm-profile")
     scored = [c for c in manifest["cases"] if c["role"] == "scored"]
-    assert len(scored) == 133
+    # Version 7 (W2): mcx_kg24_n5 is scored at level 0 only, so G5's level-2 cell is shared
+    # by one fewer group.
+    assert len(scored) == 130
     assert len({c["input_group"] for c in scored}) == 38
     for group, expected in [
         ("qft_n100", 1 / 96),
         ("qv_n50_d50", 1 / 128),
-        ("mcx_kg24_n16", 1 / 384),
+        ("mcx_kg24_n16", 1 / 320),
     ]:
         assert (
             next(
@@ -63,6 +67,13 @@ def test_confirm_manifest_weight_contract():
         )
     assert all("split" not in c for c in manifest["cases"])
     assert len(manifest["replacements"]) == 6
+    by_id = {c["case_id"]: c for c in manifest["cases"]}
+    for level in (1, 2, 3):
+        case = by_id[f"confirm/mcx_kg24_n5/mumbai_27/L{level}"]
+        assert (case["role"], case["seeds_per_block"], case["weight"]) == ("deterministic", 10, 0)
+    assert by_id["confirm/multiplier_h18_n20/heavy_hex_d9_cz/L2"]["seeds_per_block"] == 100
+    timing = [c for c in manifest["cases"] if c.get("panel") == "confirm-timing"]
+    assert len(timing) == 8 and len({c["family"] for c in timing}) == 8
 
 
 @pytest.mark.parametrize("profile", ["iterations-profile", "confirm-profile"])
@@ -87,6 +98,7 @@ def test_empty_confirm_report_summary_still_writes_decision(tmp_path):
     policy["iterations_groups"] = sorted({c["input_group"] for c in manifest["cases"]})
     records, required, summaries = evaluate_quality(manifest, policy, rows, evidence)
     assert summaries["leave_iterations_out"]["status"] == "unavailable"
+    assert summaries["leave_iterations_out/N2"]["status"] == "unavailable"
     decision = make_decision(
         {"profile": "confirm-profile", "hashes": {"manifest": "m", "policy": "p"},
          "run_id": "test"},
@@ -94,7 +106,9 @@ def test_empty_confirm_report_summary_still_writes_decision(tmp_path):
     )
     write_report(tmp_path, decision)
     assert (tmp_path / "decision.json").exists()
-    assert (tmp_path / "report.md").exists()
+    report = (tmp_path / "report.md").read_text()
+    assert "Score without the iterations profile's scored groups (report-only):" in report
+    assert "- D2: unavailable (" in report and "- N2: unavailable (" in report
 
 
 def test_empty_leave_family_out_is_unresolved():
@@ -248,3 +262,164 @@ def test_unstable_metrics_cannot_establish_quality_violations():
             row["result"] = "unresolved"
     records, required, _ = evaluate_quality(manifest, policy, rows, evidence)
     assert verdict(records, required) == "INCONCLUSIVE"
+
+
+# Mixed per-case seed counts (plan P8 / V8).
+W1_GROUPS = {
+    "qft_n100", "qft_full_n64", "dtc_n100", "qaoa_ba_n100_3reps", "qaoa_complete_n32",
+    "qv_n50_d50", "qv_n50_d20", "multiplier_h18_n32", "su2_circular_n89",
+}
+
+
+def mixed_synthetic(noise=0.01):
+    """Confirm synthetic session with 50 seeds on the W1 groups and per-seed noise."""
+    manifest, policy, rows, evidence = synthetic("confirm-profile")
+    halved = set()
+    for case in manifest["cases"]:
+        if case["role"] == "scored" and case["input_group"] in W1_GROUPS:
+            case["seeds_per_block"] = 50
+            halved.add(case["case_id"])
+    rows = [r for r in rows if not (r["case_id"] in halved and r["seed"] >= 50)]
+    scored = {c["case_id"] for c in manifest["cases"] if c["role"] == "scored"}
+    rng = random.Random(17)
+    for row in rows:
+        if row["revision"] == "evolved" and row["case_id"] in scored:
+            row["D2"] *= math.exp(rng.gauss(0, noise))
+            row["N2"] *= math.exp(rng.gauss(0, noise))
+    return manifest, policy, rows, evidence, halved
+
+
+def test_mixed_seed_counts_resolve_every_quality_summary():
+    manifest, policy, rows, evidence, halved = mixed_synthetic()
+    assert len(halved) > 10
+    records, required, summaries = evaluate_quality(manifest, policy, rows, evidence)
+    by_id = {r["id"]: r for r in records}
+    assert not [r["id"] for r in records if r["result"] == "unresolved"]
+    assert all(i in by_id for i in required if i.startswith(("CA2", "CA3", "CA4")))
+    assert by_id["CA2/improvement"]["result"] == "passed"
+    assert by_id["CA3/breadth"]["result"] == "passed"
+    families = [i for i in by_id if i.startswith(("CA4/family/", "CA4/optimization_level/"))]
+    assert len(families) >= 2 * (8 + 4)
+    assert all(by_id[i]["result"] == "passed" for i in families)
+    objective = summaries["CA2/improvement"]
+    assert objective["seed_counts"] == {"min": 50, "max": 100}
+    assert objective["SE"] > 0
+    assert [len(s["seeds"]) for s in objective["strata"]] == [50, 50]
+    for name, summary in summaries.items():
+        if name.startswith(("CA4/size_band/", "CA4/topology/", "CA4/native_basis/",
+                            "leave_family_out/", "leave_iterations_out")):
+            assert "score" in summary, name
+    assert summaries["instance_bootstrap"]["status"] == "reported"
+    assert math.isfinite(summaries["instance_bootstrap"]["U_instance"])
+    # Both metrics of the score without the iterations groups, over the same cases.
+    held_out = [summaries["leave_iterations_out"], summaries["leave_iterations_out/N2"]]
+    assert [s["metric"] for s in held_out] == ["D2", "N2"]
+    assert set(held_out[0]["cases"]) == set(held_out[1]["cases"]) == {
+        c["case_id"]
+        for c in manifest["cases"]
+        if c["role"] == "scored" and c["input_group"] not in policy["iterations_groups"]
+    }
+    assert verdict(records, required) == "PASS"
+
+
+def _write_profile(tmp_path, mutate):
+    import json
+    import shutil
+
+    from qtb.config import data_root
+
+    target = tmp_path / "profiles" / "confirm-profile"
+    shutil.copytree(data_root() / "profiles" / "confirm-profile", target)
+    manifest = json.loads((target / "manifest.json").read_text())
+    mutate(manifest)
+    (target / "manifest.json").write_text(json.dumps(manifest))
+    return tmp_path
+
+
+@pytest.mark.parametrize("count,accepted", [(50, True), (100, True), (30, False)])
+def test_load_profile_accepts_only_supported_scored_seed_counts(tmp_path, count, accepted):
+    from qtb.config import SCORED_SEED_COUNTS
+    from qtb.errors import HarnessError
+
+    assert SCORED_SEED_COUNTS == (50, 100)
+
+    def mutate(manifest):
+        for case in manifest["cases"]:
+            if case["role"] == "scored" and case["input_group"] == "qft_n100":
+                case["seeds_per_block"] = count
+
+    root = _write_profile(tmp_path, mutate)
+    if accepted:
+        manifest, _, _ = load_profile("confirm-profile", root=root, verify=False)
+        assert {c["seeds_per_block"] for c in manifest["cases"] if c["role"] == "scored"} == (
+            {50, 100} if count == 50 else {100}
+        )
+    else:
+        with pytest.raises(HarnessError, match="seeds_per_block"):
+            load_profile("confirm-profile", root=root, verify=False)
+
+
+# Per-case quality cap rule (plan section 7).
+
+
+def _set_case_differences(rows, case_id, differences, metric="D2"):
+    baseline = {
+        r["seed"]: r[metric]
+        for r in rows
+        if r["case_id"] == case_id and r["revision"] == "baseline"
+    }
+    for row in rows:
+        if row["case_id"] == case_id and row["revision"] == "evolved":
+            row[metric] = baseline[row["seed"]] * math.exp(differences[row["seed"]])
+
+
+def _cap_record(rule, differences, role="scored"):
+    manifest, policy, rows, evidence = synthetic("confirm-profile", ratio=1.0)
+    if rule is None:
+        policy.pop("quality_cap_rule", None)
+    else:
+        policy["quality_cap_rule"] = rule
+    case = next(
+        c for c in manifest["cases"]
+        if c["role"] == role and c["seeds_per_block"] == 100 and not c.get("panel")
+    )
+    _set_case_differences(rows, case["case_id"], differences)
+    records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
+    return next(r for r in records if r["id"] == f"CA4/cap/{case['case_id']}/D2")
+
+
+def _alternating(mean, spread, n=100):
+    return [mean + spread * (-1) ** s for s in range(n)]
+
+
+@pytest.mark.parametrize("role", ["scored", "guard"])
+def test_noisy_neutral_case_breaches_only_the_plain_cap(role):
+    # Ratio exp(0.055) = 1.0565 > 1.05, but SE ~ 0.030, so ln ratio < 3 SE.
+    differences = _alternating(0.055, 0.3)
+    plain = _cap_record("plain", differences, role)
+    noise_aware = _cap_record("noise_aware", differences, role)
+    assert plain["value"] > 1.05 and math.log(plain["value"]) < 3 * plain["SE"]
+    assert plain["result"] == "failed" and plain["cap_rule"] == "plain"
+    assert noise_aware["result"] == "passed" and noise_aware["cap_rule"] == "noise_aware"
+
+
+@pytest.mark.parametrize("degradation", [1.06, 1.08, 1.10])
+@pytest.mark.parametrize("rule", ["plain", "noise_aware"])
+def test_consistent_case_degradation_breaches_either_cap(rule, degradation):
+    record_ = _cap_record(rule, _alternating(math.log(degradation), 0.01))
+    assert record_["result"] == "failed"
+
+
+def test_policy_without_cap_rule_is_plain():
+    differences = _alternating(0.055, 0.3)
+    absent = _cap_record(None, differences)
+    assert absent["result"] == "failed" and absent["cap_rule"] == "plain"
+
+
+def test_noise_aware_cap_keeps_independent_guard_check():
+    # A consistent 3% guard regression is under the cap but beyond 3 SE.
+    record_ = _cap_record("noise_aware", _alternating(math.log(1.03), 0.001), "guard")
+    assert record_["value"] < 1.05
+    assert record_["result"] == "failed"
+    scored = _cap_record("noise_aware", _alternating(math.log(1.03), 0.001), "scored")
+    assert scored["result"] == "passed"
