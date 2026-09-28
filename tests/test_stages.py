@@ -37,6 +37,16 @@ def test_improving_session_passes_through_every_stage(world):
     assert decision["stage_state_hashes"]["cost"] == file_hash(root / "stages/cost/state.json")
     report = (root / "report.md").read_text()
     assert "## Stages" in report and "| cost | complete |" in report
+    assert "## Quality stage improvement" in report and "## Quality tests" in report
+    assert "- Primary D2 improvement: +3.00%. Improvement rule `IA2/improvement`: passed." in report
+    assert "- Primary N2 improvement: +3.00%. Guard `IA3/primary/N2`: passed." in report
+    quality_cases = [
+        c for c in read_json(root / "manifest.json")["cases"]
+        if c["role"] not in {"timing", "memory"}
+    ]
+    assert len(decision["quality_comparison"]["cases"]) == len(quality_cases)
+    for case in quality_cases:
+        assert f"| {case['case_id']} | {case['seeds_per_block']} |" in report
     log = (root / "progress.log").read_text()
     assert "##### quality #####" in log and "Step durations (all stages)" in log
     # Each stage writes only its own evidence; decide merges them.
@@ -61,6 +71,8 @@ def test_no_improvement_closes_the_gate_and_skips_the_rest(world):
     notes = " ".join(decision["notes"])
     assert "not checked" in notes and "Upstream tests: not run" in notes
     assert "Baseline correctness: not known from the store" in notes
+    report = (root / "report.md").read_text()
+    assert "- Primary D2 improvement: +0.00%. Improvement rule `IA2/improvement`: failed." in report
 
 
 def test_quality_failure_closes_the_gate_as_a_violation(world):

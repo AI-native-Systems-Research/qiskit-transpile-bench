@@ -85,6 +85,16 @@
     "trade_score": {
       "type": ["number", "null"]
     },
+    "quality_comparison": {
+      "type": "object",
+      "properties": {
+        "cases": {
+          "type": "array",
+          "items": {"type": "object"}
+        }
+      },
+      "required": ["cases"]
+    },
     "zero_baseline_deltas": {
       "type": "object"
     },

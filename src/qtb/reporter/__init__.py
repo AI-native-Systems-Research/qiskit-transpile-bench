@@ -2,10 +2,50 @@
 
 import math
 from pathlib import Path
+from statistics import fmean
 
 from qtb.canonical import atomic_bytes, write_json
 from qtb.config import validate
 from qtb.evaluator import verdict
+
+
+def _quality_comparison(manifest, observations):
+    """Descriptive means over each quality case's complete frozen B0 seed block."""
+    if manifest is None:
+        return {"cases": [], "reason": "Archived manifest was not supplied"}
+    rows = {
+        (row["case_id"], row["revision"], row["seed"]): row
+        for row in observations
+        if row.get("seed_block") == "B0" and row.get("mode") == "quality"
+    }
+    cases = []
+    for case in manifest["cases"]:
+        if case["role"] in {"timing", "memory"}:
+            continue
+        result = {"case_id": case["case_id"], "seed_count": case["seeds_per_block"]}
+        for metric in ("D2", "N2"):
+            pairs = [
+                tuple(rows.get((case["case_id"], revision, seed), {}).get(metric)
+                      for revision in ("baseline", "evolved"))
+                for seed in range(case["seeds_per_block"])
+            ]
+            if not pairs or not all(
+                isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+                for pair in pairs for value in pair
+            ):
+                result[metric] = {
+                    "baseline": None, "evolved": None, "improvement_percent": None
+                }
+                continue
+            baseline = fmean(pair[0] for pair in pairs)
+            evolved = fmean(pair[1] for pair in pairs)
+            result[metric] = {
+                "baseline": baseline,
+                "evolved": evolved,
+                "improvement_percent": 100 * (baseline - evolved) / baseline if baseline else None,
+            }
+        cases.append(result)
+    return {"cases": cases}
 
 
 def _zero_baseline_deltas(manifest, observations):
@@ -120,6 +160,7 @@ def make_decision(
         "required_ids": sorted(required_ids),
         "objective": objective,
         "trade_score": trade_score,
+        "quality_comparison": _quality_comparison(manifest, observations),
         "zero_baseline_deltas": _zero_baseline_deltas(manifest, observations),
         "summaries": summaries,
         "scope": run.get("scope", {}),
@@ -150,6 +191,62 @@ def _duration(seconds):
     from qtb.coordinator.runlog import duration
 
     return duration(seconds)
+
+
+def _render_quality_comparison(decision):
+    prefix = "CA" if decision["profile"] == "confirm-profile" else "IA"
+    results = {row["id"]: row["result"] for row in decision["constraints"]}
+    lines = [
+        "Primary scored-panel improvement is 100 × (1 − ratio), using the benchmark's "
+        "weighted geometric ratios. Positive percentages mean improvement (lower is better); "
+        "negative percentages mean regression. These are point estimates: the record named "
+        "on each line judges its ratio against the paired standard error.",
+        "",
+    ]
+    for metric, rule, name in (
+        ("D2", "Improvement rule", f"{prefix}2/improvement"),
+        ("N2", "Guard", f"{prefix}3/primary/N2"),
+    ):
+        score = decision["summaries"].get(name, {}).get("score")
+        shown = f"{100 * (1 - score):+.2f}%" if score is not None else "unavailable"
+        lines.append(
+            f"- Primary {metric} improvement: {shown}. "
+            f"{rule} `{name}`: {results.get(name, 'not recorded')}."
+        )
+    lines += [
+        "",
+        "## Quality tests",
+        "",
+        "One row per quality test, including guards. D2 (two-qubit depth) and N2 "
+        "(two-qubit gate count) are arithmetic means over the test's frozen B0 seeds. "
+        "Each improvement is 100 × (baseline mean − evolved mean) / baseline mean. "
+        "These descriptive means do not change the verdict or its weighted geometric "
+        "estimates, and can differ slightly from the geometric ratios under Per-case changes.",
+        "",
+        "Missing or invalid seed pairs make that metric unavailable. Percentages with a "
+        "zero baseline are N/A (undefined). Seeds is the expected count per revision.",
+        "",
+        "| Test | Seeds | Baseline D2 | Evolved D2 | D2 improvement | "
+        "Baseline N2 | Evolved N2 | N2 improvement |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    comparison = decision.get("quality_comparison", {})
+    for case in comparison.get("cases", []):
+        cells = [case["case_id"], str(case["seed_count"])]
+        for metric in ("D2", "N2"):
+            values = case[metric]
+            if values["baseline"] is None:
+                cells += ["unavailable"] * 3
+            else:
+                improvement = values["improvement_percent"]
+                cells += [
+                    f"{values['baseline']:.2f}", f"{values['evolved']:.2f}",
+                    f"{improvement:+.2f}%" if improvement is not None else "N/A",
+                ]
+        lines.append("| " + " | ".join(cells) + " |")
+    if not comparison.get("cases"):
+        lines += ["", "Unavailable: " + comparison.get("reason", "No quality tests") + "."]
+    return lines + [""]
 
 
 def render_report(decision):
@@ -194,6 +291,7 @@ def render_report(decision):
         for missing in decision["missing_records"]:
             lines.append(f"- **missing** `{missing}`")
         lines.append("")
+    lines += ["## Quality stage improvement", ""]
     if decision.get("objective"):
         objective = decision["objective"][0]
         lines += [
@@ -212,6 +310,7 @@ def render_report(decision):
         "Review trade score sqrt(D2 ratio × N2 ratio): " + trade_text,
         "",
     ]
+    lines += _render_quality_comparison(decision)
     lines += [
         "## Quality estimates",
         "",

@@ -181,6 +181,7 @@ Schema: `src/qtb/config/schemas/decision.json` (format `qtb-decision/1`).
 | `reasons` | Every record that did not pass: `code`, `result`, `detail` |
 | `missing_records` | Required IDs with no record at all |
 | `summaries` | Per-panel estimates: `ln_score`, `score`, `SE`, `ln_score_plus_2SE`, per-seed `deltas`, and per-case estimates with `worst_seed`; confirm also has `instance_bootstrap`, `leave_iterations_out` (`D2`) and `leave_iterations_out/N2` |
+| `quality_comparison` | `cases`: one entry per quality test with `case_id`, expected `seed_count`, and `D2`/`N2` objects containing arithmetic means (`baseline`, `evolved`) and `improvement_percent`. Missing or invalid seed pairs make that metric's values `null`; a zero baseline makes its percentage `null`. Without an archived manifest `cases` is empty and `reason` says so |
 | `scope` | Changed stages, substituted components and unmapped paths, per optimization level |
 | `cost_thresholds` | The fixed cost thresholds of the archived policy that every cost record was judged against |
 | `fingerprint_changes` | Cases whose pipeline fingerprint (pass list and search budgets, seed 0) differs between revisions |
@@ -224,13 +225,26 @@ The same information as `decision.json`, written for people. Sections, in order:
 6. **Constraints needing attention:** every record that is `failed`, `unresolved` or
    `not_evaluated`, with its detail, and every required record that is missing. **Start here
    when the verdict is not `PASS`.**
-7. **Quality estimates:** one row per panel: ratio (`score`; below 1 is better), paired SE in
+7. **Quality stage improvement:** the primary `D2` ratio with its paired SE and upper
+   bound, the review trade score, and the primary scored-panel D2 and N2 percentage
+   improvements, calculated as `100 × (1 − ratio)` from the benchmark's weighted geometric
+   ratios. Positive means improvement, negative means regression. The percentages are
+   point estimates: each line names the record that judges it (`*2/improvement` for D2,
+   the guard `*3/primary/N2` for N2) and that record's result, so a gain within seed noise
+   is shown next to a `failed` improvement rule.
+8. **Quality tests:** one row per quality case (including guards, excluding timing and
+   memory), with baseline and evolved D2/N2 arithmetic means across its frozen B0 seeds,
+   and percentage improvements `100 × (baseline mean − evolved mean) / baseline mean`.
+   Missing or invalid pairs make that metric unavailable; zero-baseline percentages are
+   `N/A` (undefined). These descriptive statistics do not change the verdict, and they can
+   differ slightly from the geometric case ratios of "Per-case changes".
+9. **Quality estimates:** one row per panel: ratio (`score`; below 1 is better), paired SE in
    log units, and the upper bound `ln(score) + 2·SE`. The confirm profile adds the report-only
    instance bootstrap.
-8. **Per-case changes:** each case and metric with its seed-aggregated ratio and worst seed.
-9. **Compilation cost:** each cost panel's result and the candidate's log time ratio
-   against the baseline.
-10. **Coverage and provenance:** the stage-coverage rule, the change scope as JSON, declared
+10. **Per-case changes:** each case and metric with its seed-aggregated ratio and worst seed.
+11. **Compilation cost:** each cost panel's result and the candidate's log time ratio
+    against the baseline.
+12. **Coverage and provenance:** the stage-coverage rule, the change scope as JSON, declared
     workload gaps, and the cases whose pipeline fingerprints changed.
 
 An illustrative excerpt (numbers and keys invented to show the layout):
@@ -256,13 +270,30 @@ An illustrative excerpt (numbers and keys invented to show the layout):
 
 - **unresolved** `IA1/stage-coverage`:
 
+## Quality stage improvement
+
+Primary D2 ratio: 0.978900 (paired SE 0.005400; upper 2 SE log effect -0.010526).
+
+Review trade score sqrt(D2 ratio × N2 ratio): 0.991420.
+
+- Primary D2 improvement: +2.11%. Improvement rule `IA2/improvement`: passed.
+- Primary N2 improvement: -0.41%. Guard `IA3/primary/N2`: passed.
+
+## Quality tests
+
+| Test | Seeds | Baseline D2 | Evolved D2 | D2 improvement | Baseline N2 | Evolved N2 | N2 improvement |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| iterations/qft_n100/heavy_hex_d9_cz/L2 | 100 | 1823.86 | 1779.41 | +2.44% | 9563.88 | 9598.20 | -0.36% |
+| iterations/square_heisenberg_n100/heavy_hex_d9_cz/L2 | 100 | 401.94 | 395.10 | +1.70% | 1823.88 | 1830.02 | -0.34% |
+| iterations/qaoa_ba_n100_3reps/heavy_hex_d9_cz/L2 | 100 | 1531.56 | 1498.02 | +2.19% | 8610.32 | 8655.95 | -0.53% |
+
 ## Quality estimates
 
-| Panel | Ratio | Paired SE (log) | Upper 2 SE |
-| --- | ---: | ---: | ---: |
-| IA2/improvement | 0.978900 | 0.005400 | -0.010526 |
-| IA3/primary/N2 | 1.004100 | 0.002100 | 0.008292 |
-| IA3/cx/D2 | 0.981200 | 0.005900 | -0.007179 |
+| Panel | Ratio | Paired SE (log) | Upper 2 SE | Seeds |
+| --- | ---: | ---: | ---: | ---: |
+| IA2/improvement | 0.978900 | 0.005400 | -0.010526 | 100 |
+| IA3/primary/N2 | 1.004100 | 0.002100 | 0.008292 | 100 |
+| IA3/cx/D2 | 0.981200 | 0.005900 | -0.007179 | 100 |
 ```
 
 How to read it: the `D2` score is 2.1% lower with an upper bound below zero, so the
