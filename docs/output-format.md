@@ -180,7 +180,7 @@ Schema: `src/qtb/config/schemas/decision.json` (format `qtb-decision/1`).
 | `identities` | Build ID of each revision (`baseline`, `evolved`) |
 | `constraints` | Every constraint record: `id`, `kind`, `subject`, `result`, plus details such as `value`, `SE`, `threshold` and `detail` |
 | `required_ids` | The record IDs that must all pass for `PASS` |
-| `reasons` | Every record that did not pass: `code`, `result`, `detail` |
+| `reasons` | Records that did not pass: `code`, `result`, `detail`. Unresolved report-only stage coverage is excluded; its cases remain in `constraints` and the coverage section |
 | `missing_records` | Required IDs with no record at all |
 | `summaries` | Per-panel estimates: `ln_score`, `score`, `SE`, `ln_score_plus_2SE`, per-seed `deltas`, and per-case estimates with `worst_seed`; confirm also has `instance_bootstrap`, `leave_iterations_out` (`D2`) and `leave_iterations_out/N2` |
 | `quality_comparison` | `cases`: one entry per quality test with `case_id`, expected `seed_count`, and `D2`/`N2` objects containing arithmetic means (`baseline`, `evolved`) and `improvement_percent`. Missing or invalid seed pairs make that metric's values `null`; a zero baseline makes its percentage `null`. Without an archived manifest `cases` is empty and `reason` says so |
@@ -246,8 +246,9 @@ The same information as `decision.json`, written for people. Sections, in order:
 10. **Per-case changes:** each case and metric with its seed-aggregated ratio and worst seed.
 11. **Compilation cost:** each cost panel's result and the candidate's log time ratio
     against the baseline.
-12. **Coverage and provenance:** the stage-coverage rule, the change scope as JSON, declared
-    workload gaps, and the cases whose pipeline fingerprints changed.
+12. **Coverage and provenance:** the stage-coverage rule (report-only in confirm v13),
+    uncovered scored cases, the change scope as JSON, declared workload gaps, and the cases
+    whose pipeline fingerprints changed. Archived policies retain their required coverage rule.
 
 An illustrative excerpt (numbers and keys invented to show the layout):
 

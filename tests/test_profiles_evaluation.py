@@ -191,6 +191,65 @@ def test_guard_failure_outranks_no_improvement():
     assert verdict(records, required) == "CONSTRAINT_VIOLATION"
 
 
+@pytest.mark.parametrize("coverage_required", [False, True])
+@pytest.mark.parametrize("semantic_result", ["passed", "failed", "unresolved"])
+def test_confirm_coverage_gaps_are_report_only_but_correctness_still_blocks(
+    tmp_path, monkeypatch, coverage_required, semantic_result
+):
+    from conftest import write_session
+    from qtb.coordinator.decide import decide
+
+    monkeypatch.setattr("qtb.coordinator.costs.replay_costs", lambda *args: args[-1])
+    manifest, policy, rows, evidence = synthetic("confirm-profile")
+    assert "CA1/stage-coverage" not in policy["required_ids"]
+    if coverage_required:
+        # Archived policies still require coverage and keep the original verdict.
+        policy["required_ids"].append("CA1/stage-coverage")
+    for row in rows:
+        row["checks"] = []
+    stages = split_evidence(evidence, "confirm-profile")
+    # An optimization change also requires the timing-basis cost panel.
+    stages["cost"].append(record("CA5/timing-basis", "cost", "passed"))
+    if semantic_result == "failed":
+        stages["correctness"].append(
+            record("behavior/evolved/example/0", "correctness", "failed")
+        )
+    elif semantic_result == "unresolved":
+        for row in stages["correctness"]:
+            if row["id"] == "CA1/C1-C5":
+                row["result"] = "unresolved"
+    complete = {"status": "complete"}
+    write_session(
+        tmp_path, manifest, policy, rows, stages,
+        {"compile": complete, "quality": dict(complete, gate="improved"),
+         "correctness": complete, "cost": complete},
+        run={"scope": {
+            str(level): {"stages": ["optimization"], "components": [], "unmapped_paths": []}
+            for level in range(4)
+        }},
+    )
+    code, decision = decide(tmp_path, progress=lambda *_: None)
+    expected = (
+        (20, "CONSTRAINT_VIOLATION") if semantic_result == "failed" else
+        (30, "INCONCLUSIVE") if coverage_required or semantic_result == "unresolved" else
+        (0, "PASS")
+    )
+    assert (code, decision["status"]) == expected
+    coverage = next(r for r in decision["constraints"] if r["id"] == "CA1/stage-coverage")
+    assert coverage["result"] == "unresolved"
+    assert set(coverage["cases"]) == {
+        c["case_id"] for c in manifest["cases"] if c["role"] == "scored"
+    }
+    assert ("CA1/stage-coverage" in decision["required_ids"]) == coverage_required
+    assert any(r["code"] == "CA1/stage-coverage" for r in decision["reasons"]) == coverage_required
+    report = (tmp_path / "report.md").read_text()
+    assert "Uncovered scored cases:" in report
+    if coverage_required:
+        assert "Automatic acceptance requires verified coverage" in report
+    else:
+        assert "Stage coverage: unresolved (report-only; does not affect verdict)." in report
+
+
 @pytest.mark.parametrize("mutation", ["missing", "zero", "audit"])
 def test_incomplete_or_unstable_panel_cannot_claim_improvement(mutation):
     manifest, policy, rows, evidence = synthetic()

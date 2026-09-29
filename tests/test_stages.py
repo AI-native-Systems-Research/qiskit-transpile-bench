@@ -654,7 +654,7 @@ def test_version_five_policies_need_no_qualification():
     for profile in ("iterations-profile", "confirm-profile"):
         manifest, policy, _ = load_profile(profile, verify=False)
         assert policy["version"] == manifest["version"] == (
-            12 if profile == "confirm-profile" else 10
+            13 if profile == "confirm-profile" else 10
         )
         assert "harness/qualification" not in policy["required_ids"]
         assert not any(i.endswith("1/upstream") for i in policy["required_ids"])

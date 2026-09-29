@@ -245,8 +245,8 @@ never taken from the baseline store: both arms are measured in the same session.
 
 ## 7. Change scope and stage coverage
 
-A candidate can only `PASS` if a **verified** correctness check covers every transpiler stage
-it changed (`evaluator/scope.py`):
+Stage coverage records whether a **verified** correctness check covers every transpiler
+stage a candidate changed (`evaluator/scope.py`):
 
 1. The changed files are the difference between the two snapshots.
 2. Each path is mapped to stages, per optimization level. Examples: `sabre` →
@@ -263,12 +263,17 @@ The rule combines the quality checks (C0, C6) with the C7 Clifford checks of the
 `correctness` stage, so `decide` computes `*1/stage-coverage` once both stages are complete.
 If either has not run, for example because the quality gate is closed, the record is missing.
 
-In practice: routing replay (C6) covers layout and routing on every scored output, so a
-layout/routing-only change can `PASS`. Nothing verifies the optimization stage at scale for
-100-qubit generic-angle circuits at levels 2–3, so a change there reaches at most
-`INCONCLUSIVE` when no other applicable check covers it. Confirm version 12 removes
-C1-lite, so small scored outputs no longer receive that all-stage evidence. The stage-coverage
-requirement still applies; removing C1-lite does not establish coverage of additional stages.
+**Confirm version 13:** `CA1/stage-coverage` is report-only. An unresolved coverage record
+and its uncovered cases remain in `decision.json` and the report, but the record is not in
+`required_ids` and its gaps are not listed as verdict-blocking reasons. Acceptance still
+requires the correctness test suite and all other required checks. This establishes passing
+test-suite evidence, not complete semantic coverage of the scored workload.
+
+**Iterations and archived confirm policies:** stage coverage remains mandatory when its ID
+is in the frozen policy's `required_ids`. Routing replay (C6) covers layout and routing on
+every scored output, so a layout/routing-only change can pass this requirement. A change to
+optimization can remain `INCONCLUSIVE` where no applicable check covers it. Confirm version
+12 removed C1-lite; version 13 changes only how the remaining coverage gaps affect acceptance.
 
 ## 8. From records to verdict
 

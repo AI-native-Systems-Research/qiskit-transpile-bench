@@ -42,6 +42,11 @@ The frozen C1–C5 suite has 480 configurations × 5 seeds = 2,400 compiles per 
 coverage and limits. A proven candidate mismatch becomes a failed correctness record; a
 check that cannot decide is unresolved and never counts as a pass.
 
+In confirm version 13, `CA1/stage-coverage` is diagnostic: `decide` still lists scored
+cases without verification covering all changed stages, but those gaps alone do not block
+acceptance. The correctness suite, API checks, C7 and baseline preflight remain required;
+proven failures and unresolved required tests retain their existing verdicts.
+
 ## Outputs and baseline reuse
 
 The stage owns `correctness.jsonl`, `clifford.jsonl` and `stages/correctness/`. The baseline

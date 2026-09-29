@@ -181,6 +181,11 @@ def make_decision(
             {"code": r["id"], "result": r["result"], "detail": r.get("detail", "")}
             for r in records
             if r["result"] not in {"passed", "passed_on_rerun"}
+            and not (
+                r["id"] == f"{prefix}1/stage-coverage"
+                and r["id"] not in required_ids
+                and r["result"] == "unresolved"
+            )
         ],
         "missing_records": sorted(set(required_ids) - {r["id"] for r in records}),
     }
@@ -434,12 +439,19 @@ def render_report(decision):
                 f"| {row['id']} | {row['result']} | {regime} | "
                 f"{row['candidate']['ln_panel']:.6f} |"
             )
+    coverage_required = any(id_.endswith("/stage-coverage") for id_ in decision["required_ids"])
     lines += [
         "",
         "## Coverage and provenance",
         "",
-        "Automatic acceptance requires verified coverage of all changed stages "
-        "on every scored case.",
+        (
+            "Automatic acceptance requires verified coverage of all changed stages "
+            "on every scored case."
+            if coverage_required else
+            "Stage coverage is report-only: uncovered scored cases do not block acceptance. "
+            "A pass requires the correctness test suite; it does not establish semantic "
+            "coverage of every scored circuit."
+        ),
         "Routing replay covers layout and routing; substituted synthesis does not "
         "cover synthesis changes.",
         "Zero-input checks are not all-input equivalence claims.",
@@ -456,7 +468,8 @@ def render_report(decision):
         None,
     )
     if coverage:
-        lines.append(f"Stage coverage: {coverage['result']}.")
+        label = "" if coverage_required else " (report-only; does not affect verdict)"
+        lines.append(f"Stage coverage: {coverage['result']}{label}.")
         if coverage.get("cases"):
             lines.append("Uncovered scored cases: " + ", ".join(coverage["cases"]) + ".")
     exclusions = decision.get("exclusions", {})

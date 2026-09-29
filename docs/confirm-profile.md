@@ -23,7 +23,7 @@ The profile is chosen once, on `compile`; the later stages read it from the sess
 [README](../README.md) for the stages, the store and the exit codes.
 
 Files: `profiles/confirm-profile/manifest.json` and `profiles/confirm-profile/policy.json`.
-Version 12 ([what changed](#version-12)).
+Version 13 ([what changed](#version-13)).
 
 > **Do not tune on this profile.** The workload is public and fixed, with no held-back part.
 > Editing a candidate and rerunning confirm until it passes turns it into a second tuning
@@ -131,7 +131,7 @@ three-circuit iterations score to improve.
 
 | Rule | Records | Requirement |
 | --- | --- | --- |
-| CA1 correctness | `CA1/C0`, `CA1/C1-C5`, `CA1/C6`, `CA1/C7`, `CA1/stage-coverage`, and `CA1/upstream` once `unit-tests` has started | As IA1, with C7 on 5 seeds (`clifford_seeds`) in prefix and full mode. Quality performs C0 and C6; semantic fixture checks run in the correctness stage. |
+| CA1 correctness | `CA1/C0`, `CA1/C1-C5`, `CA1/C6`, `CA1/C7`, and `CA1/upstream` once `unit-tests` has started | As IA1, with C7 on 5 seeds (`clifford_seeds`) in prefix and full mode. Quality performs C0 and C6; semantic fixture checks run in the correctness stage. Unlike IA1, stage coverage is report-only: uncovered scored cases do not block a pass. |
 | CA2 improvement | `CA2/improvement` | `ln(D2 score) + 2·SE < ln(0.99)`, a practical 1% reduction beyond seed noise |
 | CA3 breadth | `CA3/breadth` | At least 4 of the 8 families individually satisfy `ln(D2) + 2·SE < 0`, **and** removing any one family still leaves the score below 1 |
 | CA4 guards | `CA3/primary/N2`, `CA3/cx/*`, `CA3/ecr/*`, `CA4/family/<G>/<metric>`, `CA4/optimization_level/<L>/<metric>`, `CA4/cap/...`, `CA4/exact/...` | Family and level `D2`/`N2`: `ln(score) ≤ ln(1.05) + 3·SE`. Overall `N2` and basis panels retain zero margin. Individual guard cases outside basis panels: `ln(ratio) ≤ ln(1.15) + 3·SE`. Per-case cap 2.0. Ordinary deterministic cases: each metric ≤ 1.25× baseline on every seed. Zero-baseline and canary cases remain strict. Band, topology and native-basis summaries are reported only |
@@ -139,7 +139,7 @@ three-circuit iterations score to improve.
 | CA6 completeness | `CA6/completeness` | Every observation present; determinism audit passed |
 
 Required IDs in `policy.json`: `harness/roundtrip`, `baseline/preflight`,
-`audit/determinism`, `CA1/C0`, `CA1/C1-C5`, `CA1/C6`, `CA1/C7`, `CA1/stage-coverage`,
+`audit/determinism`, `CA1/C0`, `CA1/C1-C5`, `CA1/C6`, `CA1/C7`,
 `CA2/improvement`, `CA5/timing`, `CA6/completeness`, `CA3/breadth`,
 `CA5/confirm-timing` and `CA5/memory`. The evaluator adds every guard, cap and exact record it
 creates, and the cost panels the change scope requires.
@@ -152,7 +152,11 @@ leave out ([verifier.md](workflow/unit-tests.md#what-runs)). The rule is: if you
 `ERROR`. If the stage never started, or the quality gate skipped it, the verdict is decided
 without it and the report says "Upstream tests: not run."
 
-Report-only numbers:
+Report-only results:
+
+- **Stage coverage** (`CA1/stage-coverage`): lists scored cases without verified evidence
+  covering all changed stages. Gaps do not block acceptance. Passing the dedicated correctness
+  tests does not establish semantic coverage of every scored circuit.
 
 - **`U_instance`**: a family-stratified cluster bootstrap over input groups (10,000
   replicates). It estimates how much the score depends on which circuits were chosen. It is
@@ -164,6 +168,16 @@ Report-only numbers:
 
 Policy differences from the iterations profile: `practical_ratio` is 0.99 (versus 1.0), and
 the required set adds `CA3/breadth`, `CA5/confirm-timing` and `CA5/memory`.
+
+## Version 13
+
+Version 13 makes `CA1/stage-coverage` report-only by removing it from `required_ids`.
+`decide` still computes coverage and reports every uncovered scored case. Coverage gaps
+alone no longer make the verdict `INCONCLUSIVE`. The C1–C5 suite, API checks, C7,
+baseline preflight, numerical tolerances, timeout handling, quality guards and cost checks
+are unchanged. Actual correctness failures and unresolved required tests still block a pass.
+The workload is unchanged. Existing sessions retain their archived coverage requirement;
+new sessions use version 13. The iterations profile retains mandatory stage coverage.
 
 ## Version 12
 

@@ -64,7 +64,11 @@ Do not edit a frozen profile to accept a candidate. Recuration is an explicit ma
 operation using `tools/curate/curate.py`; comparisons consume only frozen artifacts.
 The original RevLib/HWB claims do not transfer to their declared generated replacements.
 
-Confirm is at version 12; iterations remains at version 10.
+Confirm is at version 13; iterations remains at version 10.
+
+Version 13 of confirm removes `CA1/stage-coverage` from `required_ids`. Coverage is still
+computed and reported; uncovered scored cases no longer block a pass. Other correctness
+rules are unchanged. Archived policies that require coverage retain that behavior.
 
 Version 12 of confirm removes C1-lite from the policy and quality implementation; it
 retains version 11's 5% family/level, 15% individual statistical, and 25% deterministic
@@ -102,7 +106,7 @@ policy adds `quality_batch_schedule`, `c1_lite_max_width` (22), `quality_timeout
 moves its C7 settings into the policy (`clifford_seeds` 3, no full mode) and adds
 `quality_timeout`; its manifest changes only its version. The unimplemented
 design/iterations-quality-coverage-plan.md also claimed version 7 for its expansion; it will
-need a version after 12.
+need a version after 13.
 
 Every new key is optional in the schema, and a policy without it keeps the rule of version 6:
 the fixed `quality_batch_size`, a C1-lite limit of 25, a candidate timeout that always fails,

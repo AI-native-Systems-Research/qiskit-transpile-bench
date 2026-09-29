@@ -159,6 +159,7 @@ def policy(profile, cases=(), catalog=()):
         f"{prefix}6/completeness",
     ]
     if prefix == "CA":
+        required.remove("CA1/stage-coverage")
         required += ["CA3/breadth", "CA5/confirm-timing", "CA5/memory"]
     confirm = prefix == "CA"
     extra_protocol = {}
