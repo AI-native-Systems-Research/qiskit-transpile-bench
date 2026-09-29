@@ -380,7 +380,7 @@ Each stage can run on a different host. Then:
 
 ## Still to calibrate on your cluster
 
-The monitoring thresholds and window length are frozen with contract `qtb-lsf-monitor/3`
+The monitoring thresholds and window length are frozen with contract `qtb-lsf-monitor/4`
 (foreign CPU below 15 % of physical-core time, 2-second windows, only measured windows decisive); they are IOCR's starting values. Before relying on cost verdicts, run
 quiet A/A sessions and controlled contention on the chosen tier to establish the false
 rejection rate and the monitoring overhead ([validation](validation.md#monitored-cost-on-lsf)).

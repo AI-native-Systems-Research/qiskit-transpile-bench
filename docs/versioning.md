@@ -30,14 +30,22 @@ tag.
 
 ## The monitor contract
 
-Monitored cost evidence follows contract `qtb-lsf-monitor/3`, frozen in
+Monitored cost evidence follows contract `qtb-lsf-monitor/4`, frozen in
 `lsf/cost_monitor.py`: the check (A, foreign CPU on the worker core), its threshold (15 % of
-physical-core time with a 0.03 s floor), which windows are decisive (only measured ones), the 2-second window, the 2-second idle probe, the
+physical-core time with a 0.05 s floor, compared at clock-tick resolution), which windows are decisive (only measured ones), the 2-second window, the 2-second idle probe, the
 nine-core allocation and the CPU layout (monitor on the first core, worker on the second).
 The bundle evidence is tagged `qtb-lsf-monitor-evidence/1`.
 Its worker records include acknowledged measured intervals for every entry. Windows split
 at their boundaries, excluding setup and warmup from measured-window denominators. Evidence
 without those intervals is inadmissible.
+
+Contract 4 changed three things from contract 3. The floor went from 0.03 s to 0.05 s. A
+foreign time exactly at the limit now passes, even when a float difference of the since-boot
+counters rounds it a hair above. A measured interval's tail at its `E` boundary that is
+shorter than floor / fraction (about 0.33 s) now joins the window before it in that
+interval. Contract 3 aborted clean runs on counter rounding in such tails (0.03 s read as
+0.03000000003 s in a 0.1 s tail). Contract 3 sessions cannot measure under contract 4:
+create a new session.
 
 - A session records the contract, the thresholds, the layout, the approved hardware tier and
   the identity of the measurement code (`lsf/context.py`, `lsf/cost_monitor.py`,

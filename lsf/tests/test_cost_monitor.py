@@ -37,11 +37,19 @@ def comparison(required=None):
 
 def test_checks_have_floors_for_short_windows_and_scale_with_long_ones():
     t = THRESHOLDS
-    assert check_a(0.03, 0.1, t)[0] and not check_a(0.031, 0.1, t)[0]
+    assert check_a(0.05, 0.1, t)[0] and not check_a(0.06, 0.1, t)[0]
     assert check_a(0.3, 2.0, t)[0] and not check_a(0.31, 2.0, t)[0]
     window = {"seconds": 2.0, "foreign_s": 0.5}
     assert [r[:2] for r in judge(window, t)] == ["A:"]
     assert judge(dict(window, foreign_s=0.0), t) == []
+
+
+def test_a_whole_number_of_ticks_at_the_limit_is_not_tipped_over_by_float_rounding():
+    # Five ticks read as the difference of two since-boot counters in float seconds.
+    before, after = 1234567.89, 1234567.94
+    assert after - before > THRESHOLDS["foreign_cpu_floor_s"]
+    assert check_a(after - before, 0.1, THRESHOLDS)[0]
+    assert not check_a(after - before + 0.01, 0.1, THRESHOLDS)[0]
 
 
 def test_preflight_pins_disjoint_full_cores_and_probes_the_idle_worker_core(
@@ -298,12 +306,58 @@ def test_setup_cannot_dilute_noise_in_a_short_measurement(tmp_path, probe, fast_
     hooks.launched(100)
     probe.advance(1.5)  # clean input loading and warmup
     assert hooks.measurement(100, b"B") is None
-    probe.foreign = lambda _: 0.5
-    probe.advance(0.1)  # 50 ms foreign work: hidden in a 1.6 s lifetime window
+    probe.foreign = lambda _: 0.6
+    probe.advance(0.1)  # 60 ms foreign work: hidden in a 1.6 s lifetime window
     problem = hooks.measurement(100, b"E")
     assert isinstance(problem, Contaminated)
     assert problem.evidence["window"]["seconds"] == pytest.approx(0.1)
     assert problem.evidence["window"]["measurement"] == 0
+
+
+def measure_with_a_tail(m, probe, tail, foreign):
+    """One measured interval of two full windows and a ``tail``; ``foreign(s)`` is the
+    foreign busy fraction ``s`` seconds after ``B``."""
+    hooks = m.worker_hooks("0-batch-baseline")
+    hooks.spawn_options()
+    probe.start(100)
+    hooks.launched(100)
+    probe.advance(1.0)
+    assert hooks.measurement(100, b"B") is None
+    begun = probe.t
+    probe.foreign = lambda t: foreign(t - begun)
+    for _ in range(2):
+        probe.advance(THRESHOLDS["window_s"] + 0.05)
+        assert hooks.progress(100, 0) is None
+    probe.advance(tail)
+    return hooks, hooks.measurement(100, b"E")
+
+
+def test_a_floor_limited_tail_rejoins_its_previous_window(tmp_path, probe, fast_thresholds):
+    # Contract 3 aborted on counter rounding in a 0.1 s tail: 60 ms is over the floor alone.
+    m = prepared(tmp_path, probe)
+    hooks, problem = measure_with_a_tail(m, probe, 0.1, lambda s: 0.6 if s >= 4.1 else 0.0)
+    assert problem is None
+    measured = [w for w in hooks.record["windows"] if w["measurement"] == 0]
+    assert [w["seconds"] for w in measured] == pytest.approx([2.05, 2.15])
+    assert [w["index"] for w in hooks.record["windows"]] == [0, 1, 2]
+    assert measured[0]["start"] == hooks.record["measurements"][0]["start"]
+    assert measured[-1]["end"] == hooks.record["measurements"][0]["end"]
+    assert all(a["end"] == b["start"] for a, b in zip(measured, measured[1:], strict=False))
+
+
+def test_noise_that_reaches_into_a_rejoined_tail_still_aborts(tmp_path, probe, fast_thresholds):
+    m = prepared(tmp_path, probe)
+    _, problem = measure_with_a_tail(m, probe, 0.2, lambda s: 1.0 if s >= 3.8 else 0.0)
+    assert isinstance(problem, Contaminated)
+    assert problem.evidence["window"]["seconds"] == pytest.approx(2.25)
+
+
+def test_a_tail_the_fraction_limits_is_judged_alone(tmp_path, probe, fast_thresholds):
+    # Joined, 0.4 s of noise in a 2.55 s window would be 16 %; alone it is 80 %.
+    m = prepared(tmp_path, probe)
+    _, problem = measure_with_a_tail(m, probe, 0.5, lambda s: 1.0 if s >= 4.2 else 0.0)
+    assert isinstance(problem, Contaminated)
+    assert problem.evidence["window"]["seconds"] == pytest.approx(0.5)
 
 
 def test_descendants_cannot_escape_the_worker_core(tmp_path, probe, fast_thresholds):

@@ -46,7 +46,7 @@ the worker's timers and must be included in cluster overhead calibration.
 
 | Check | Measured | Accepted when |
 | --- | --- | --- |
-| A. Foreign CPU activity | Busy time of the worker core, all SMT siblings, less the CPU time of the worker and its descendants over the same window | At most 15 % of physical-core time (at least 0.03 s for short windows) |
+| A. Foreign CPU activity | Busy time of the worker core, all SMT siblings, less the CPU time of the worker and its descendants over the same window | At most 15 % of physical-core time (at least 0.05 s for short windows; a measured interval's tail that short joins the window before it) |
 
 Involuntary context switches are not checked. The worker's own threads (Qiskit's Rust
 thread pool as well as the Python thread) all run on the one worker core and preempt each
@@ -64,7 +64,7 @@ they describe the whole host, not the allocated cores.
 The check detects CPU interference; they do not prove the absence of shared-cache,
 memory-bandwidth, frequency or thermal effects. The paired, interleaved protocol below
 remains the defense against those. The thresholds are starting points frozen with contract
-`qtb-lsf-monitor/3` and must be calibrated on the chosen tier
+`qtb-lsf-monitor/4` and must be calibrated on the chosen tier
 ([validation](../validation.md#monitored-cost-on-lsf)).
 
 **Machine (`machine`), direct runs.** Without a monitor the stage takes an exclusive per-user

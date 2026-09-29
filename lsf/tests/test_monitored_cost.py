@@ -120,7 +120,7 @@ def test_monitored_cost_is_admitted_replayed_and_survives_cleanup(monitored):
     assert outcome["exit_code"] == 0 and outcome["state"]["status"] == "complete"
     code, decision = decide(world.session, progress=QUIET)
     assert decision["status"] == "PASS"
-    assert any("monitored (qtb-lsf-monitor/3)" in note for note in decision["notes"])
+    assert any("monitored (qtb-lsf-monitor/4)" in note for note in decision["notes"])
     assert clean(world.session, progress=QUIET) == 0
     # Replay after cleanup: the bundles and their monitoring evidence were kept.
     assert decide(world.session, progress=QUIET)[1]["status"] == "PASS"

@@ -112,6 +112,15 @@ pinned worker core. Contract `qtb-lsf-monitor/3` therefore keeps only check A; t
 worker windows and the evidence no longer record involuntary switches. The earlier
 sections describe the contract-2 monitor as it was validated then.
 
+On the Xeon Gold 6258R tier, clean contract-3 measured windows read between −5 and +5 ticks
+(±0.05 s) of foreign CPU (144 windows of a timing and a preset panel). The foreign time is
+the difference of the core's tick-sampled busy time and the worker's tick-rounded CPU time,
+read at slightly different moments. Two contract-3 attempts on a host with a clean idle
+probe then aborted in the same place: a 0.1 s tail at a measured interval's `E` boundary,
+0.03 s of busy time and none attributed to the worker, judged against the 0.03 s floor and
+failed by float rounding. Contract 4 raises the floor to 0.05 s, compares at tick
+resolution, and joins floor-limited tails to the interval's previous window.
+
 ## Monitored cost on LSF
 
 Before relying on cost verdicts from the cluster, on the selected hardware tier and CPU

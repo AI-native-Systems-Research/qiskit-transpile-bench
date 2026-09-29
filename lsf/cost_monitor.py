@@ -21,8 +21,10 @@ tell interference from the worker's own work.
 Only windows inside a measured interval (between the worker's acknowledged ``B`` and ``E``
 boundaries) are decisive. Setup, imports, warmup and reporting windows are judged and
 recorded, but produce no timed sample, so they never abort: short start-up windows fail the
-floor on the worker's own start-up alone. The first decisive window that fails the check
-aborts the measurement: the worker is stopped and reaped and ``Contaminated`` is
+floor on the worker's own start-up alone. A measured interval's tail at its ``E`` boundary
+that is so short the floor sets its limit rejoins the interval's previous window rather
+than being judged on a few clock ticks (contract 4). The first decisive window that fails
+the check aborts the measurement: the worker is stopped and reaped and ``Contaminated`` is
 raised, which ends the stage ``noisy``. Missing samples,
 invalid counters or a changed CPU mask are never clean: they raise ``MonitorFailure``. The
 check detects CPU interference; they do not prove the absence of shared-cache,
@@ -47,7 +49,7 @@ from lsf import logging as log
 from lsf import measurement_identity
 from lsf.context import allocation_problems, parse_cpu_list
 
-CONTRACT = "qtb-lsf-monitor/3"
+CONTRACT = "qtb-lsf-monitor/4"
 EVIDENCE_FORMAT = "qtb-lsf-monitor-evidence/1"
 COST_SLOTS = 9
 LAYOUT = "monitor=core0,worker=core1,reserved=core2-8"
@@ -60,10 +62,15 @@ THRESHOLDS = {
     "window_s": 2.0,
     "idle_probe_s": 2.0,
     # A: foreign busy time on the worker core as a fraction of physical-core time, with a
-    # floor for clock-tick granularity in short windows.
+    # floor for clock-tick granularity in short windows. Foreign time is the difference of
+    # two tick-rounded counters sampled apart, so clean windows read up to ±5 ticks.
     "foreign_cpu_fraction": 0.15,
-    "foreign_cpu_floor_s": 0.03,
+    "foreign_cpu_floor_s": 0.05,
 }
+# Counters step in whole clock ticks (10 ms at USER_HZ 100), but a difference of two
+# since-boot readings in float seconds can overshoot a whole number of ticks by rounding.
+# Far below one tick, so it never admits a real one.
+COUNTER_EPSILON_S = 1e-6
 
 
 class MonitorFailure(HarnessError):
@@ -72,7 +79,7 @@ class MonitorFailure(HarnessError):
 
 def check_a(foreign_s, seconds, thresholds):
     limit = max(thresholds["foreign_cpu_fraction"] * seconds, thresholds["foreign_cpu_floor_s"])
-    return foreign_s <= limit, limit
+    return foreign_s <= limit + COUNTER_EPSILON_S, limit
 
 
 def decisive(window):
@@ -475,6 +482,8 @@ class WorkerHooks:
         self.pid = None
         self.record = None
         self.window = None
+        # The start sample of the last recorded window, so a short tail can rejoin it.
+        self.opened = None
         self.final = None
         self.aborted = False
         self.entries = 0
@@ -524,7 +533,7 @@ class WorkerHooks:
         }
         self.records.append(self.record)
         monitor._verify(pid, self.cpus, "worker")
-        self.window = self._sample(now)
+        self.window, self.opened = self._sample(now), None
 
     def _close(self, end, final):
         """One window's deltas, isolated per actual process.
@@ -555,8 +564,30 @@ class WorkerHooks:
             "final": final,
             "measurement": self.measuring,
         }
-        self.window = end
+        self.window, self.opened = end, start
         return window
+
+    def _tail(self, end):
+        """The last window of a measured interval, closed at its ``E`` boundary.
+
+        A tail so short that the floor, not the fraction, sets its limit rejoins the
+        interval's previous window: on its own it would be judged on a few clock ticks,
+        where counter rounding alone reaches the floor. Longer tails stay alone, so joining
+        never dilutes noise the fraction could see. So does a tail when the interval has no
+        earlier window, or when joining would exceed the bound the validator allows.
+        """
+        windows = self.record["windows"]
+        t = self.monitor.thresholds
+        if (
+            windows
+            and windows[-1]["measurement"] == self.measuring
+            and end["time"] - self.window["time"]
+            < t["foreign_cpu_floor_s"] / t["foreign_cpu_fraction"]
+            and end["time"] - self.opened["time"] <= 2 * t["window_s"]
+        ):
+            windows.pop()
+            self.window = self.opened
+        return self._close(end, final=False)
 
     def measurement(self, pid, event):
         """Split at acknowledged worker boundaries, after warmup and before reporting.
@@ -573,7 +604,8 @@ class WorkerHooks:
         sample = self._sample(now)
         problem = None
         if now > self.window["time"]:
-            problem = self._judge(self._close(sample, final=False))
+            close = self._tail if event == b"E" else partial(self._close, final=False)
+            problem = self._judge(close(sample))
         if problem is not None:
             return problem
         if event == b"B":
