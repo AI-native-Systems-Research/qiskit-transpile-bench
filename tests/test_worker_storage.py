@@ -692,7 +692,6 @@ def test_c6_replays_the_snapshots_of_the_same_compile(tmp_path):
             "revision": "baseline",
             "build_id": "a" * 64,
             "rows": outputs,
-            "c1_lite": None,
         }
     )
     assert [[c["oracle"] for c in o["checks"]] for o in checked["observations"]] == [
@@ -744,7 +743,7 @@ def test_routing_replay_scope_limits_case_guards(monkeypatch):
     checked = quality.check_batch(
         {
             "case": canary, "case_hash": "h", "target_path": "t", "revision": "baseline",
-            "build_id": "b", "c1_lite": 22,
+            "build_id": "b",
             "rows": [{"seed": 0, "status": "ok", "output": "o", "output_hash": "h",
                       "layout": None}],
         }

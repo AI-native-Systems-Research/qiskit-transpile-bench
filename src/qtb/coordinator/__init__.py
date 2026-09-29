@@ -41,7 +41,6 @@ from qtb.coordinator.quality import (
     SlotPool,
     audit_check,
     batches,
-    c1_lite_width,
     check_batch,
     quality_slots,
     routing_replay_seeds,
@@ -114,7 +113,7 @@ def gate(builds, records, required_quality=(), required_improvements=()):
 
     ``records`` are the evaluated quality records together with the compile and quality
     evidence. Every non-improvement record must pass, including the round-trip, the audit,
-    C0, C6, C1-lite, the guards and completeness. Unlike ``cost_stage_due``, an unresolved
+    C0, C6, the guards and completeness. Unlike ``cost_stage_due``, an unresolved
     check closes the gate, also on an A/A run.
 
     - ``improved``: every improvement record passed as well;
@@ -158,7 +157,7 @@ def gate(builds, records, required_quality=(), required_improvements=()):
 def stage_coverage(run, cases, observations, clifford, prefix):
     """``*1/stage-coverage``: every scored case has verified coverage of the changed stages.
 
-    It combines the quality checks (C0, C6, C1-lite) with the C7 Clifford checks, so
+    It combines the quality checks (C0, C6) with the C7 Clifford checks, so
     ``decide`` computes it once both the quality and correctness stages are complete.
     """
     quality = [r for r in observations if r["seed_block"] == "B0"]
@@ -786,7 +785,7 @@ class Comparison:
         return self.directory / "stages" / getattr(self, "stage", "quality") / "batches"
 
     def quality(self, cases, revisions=("baseline", "evolved")):
-        """Compile every quality seed with its C0, C6 and C1-lite checks.
+        """Compile every quality seed with its C0 and C6 checks.
 
         Baseline rows come from the store when present; fresh baseline rows are added to it.
         Evolved rows are never stored. An A/A session bypasses the stored rows, so it stays
@@ -799,8 +798,6 @@ class Comparison:
         """
         protocol = self.policy["measurement_protocol"]
         use_store = self.store is not None and not same_build(self.run["builds"])
-        confirm = self.run.get("profile") == "confirm-profile"
-        limit = c1_lite_width(protocol) if confirm else None
         cached, tasks, measured = {}, [], {}
         checkpointed = {}
         for path in sorted(self.batch_dir.glob("*.json")):
@@ -870,7 +867,7 @@ class Comparison:
             with self.quality_pools() as (slots, pool, drivers, size):
                 self.progress(f"Quality: {size} runnable tasks at a time, longest first.")
                 futures = {
-                    drivers.submit(self.quality_task, task, slots, pool, limit): task
+                    drivers.submit(self.quality_task, task, slots, pool): task
                     for task in pending
                 }
                 try:
@@ -935,8 +932,8 @@ class Comparison:
         )
         return row
 
-    def quality_task(self, task, slots, pool, limit):
-        """Compile, check and verify one batch, then checkpoint it; runs on a driver thread.
+    def quality_task(self, task, slots, pool):
+        """Compile and check one batch, then checkpoint it; runs on a driver thread.
 
         Each step holds one slot and releases it before waiting for the next.
         """
@@ -953,26 +950,12 @@ class Comparison:
             "revision": revision,
             "build_id": self.run["builds"][revision]["id"],
             "rows": rows,
-            "c1_lite": limit,
         }
         with slots.slot(SlotPool.CHECK):
             started = time.monotonic()
             checked = pool.submit(check_batch, spec).result()
             timings["checks"] = time.monotonic() - started
         observations = checked["observations"]
-        if checked["lite"]:
-            started = time.monotonic()
-            verdicts = self.verify_many(
-                [
-                    (case, observations[index], "C1-lite", None, {"max_qubits": limit})
-                    for index, _ in checked["lite"]
-                ]
-            )
-            for (index, union_width), check in zip(checked["lite"], verdicts, strict=True):
-                observations[index]["checks"].append(
-                    dict(check, oracle="C1-lite", union_width=union_width, max_width=limit)
-                )
-            timings["verify"] = time.monotonic() - started
         write_json(
             self.batch_dir / f"{task['key']}.json",
             {"revision": revision, "case_id": case["case_id"], "seeds": seeds,
@@ -1149,7 +1132,7 @@ class Comparison:
             write_json(entry / f"{name}.json", dict(proof, evidence=evidence))
 
     def aggregate_checks(self, cases, observations):
-        """The C0, C6 and C1-lite records over both revisions, and completeness.
+        """The C0 and C6 records over both revisions, and completeness.
 
         A failure both revisions share on the same case and seed, with the same failure
         witness (``quality.shared_failures``), is not a candidate failure: the baseline's
@@ -1158,62 +1141,6 @@ class Comparison:
         """
         quality = [r for r in observations if r["seed_block"] == "B0"]
         subjects = {"baseline": "reference", "evolved": "evolved"}
-        if self.run["profile"] == "confirm-profile":
-            limit = c1_lite_width(self.policy["measurement_protocol"])
-            shared = shared_failures(quality, "C1-lite")
-            excused = {pair["evolved"] for pair in shared.values()}
-            eligible = {}
-            for row in quality:
-                for check in row["checks"]:
-                    if check["oracle"] != "C1-lite":
-                        continue
-                    key = row["case_id"], row["seed"]
-                    eligible.setdefault(key, {})[row["revision"]] = check
-                    if check["status"] == "mismatch" and row["id"] not in excused:
-                        self.evidence(
-                            record(
-                                f"C1-lite/{row['id']}",
-                                "correctness",
-                                "failed",
-                                subjects[row["revision"]],
-                            )
-                        )
-            # A pair is required when the baseline output fits the limit; the evolved
-            # output must then verify too. A wider or missing evolved check leaves it open.
-            applicable = {
-                key: pair
-                for key, pair in eligible.items()
-                if pair.get("baseline", {}).get("union_width", limit + 1) <= limit
-            }
-            open_pairs = sorted(
-                key
-                for key, pair in applicable.items()
-                if any(pair.get(rev, {}).get("status") != "verified" for rev in subjects)
-            )
-            overruns = sorted(
-                key
-                for key, pair in applicable.items()
-                if pair.get("evolved", {}).get("union_width", limit + 1) > limit
-            )
-            exclusions = sum(
-                pair.get("baseline", {}).get("union_width", 0) > limit
-                for pair in eligible.values()
-            )
-            okay = bool(applicable) and not open_pairs
-            self.evidence(
-                record(
-                    "CA1/C1-lite",
-                    "correctness",
-                    "passed" if okay else "unresolved",
-                    eligible_observations=len(applicable),
-                    max_width=limit,
-                    unverified_pairs=[list(key) for key in open_pairs[:50]],
-                    unverified_count=len(open_pairs),
-                    baseline_width_exclusions=exclusions,
-                    evolved_width_overruns=[list(key) for key in overruns[:50]],
-                    **({"shared_failures": sorted(shared.values(), key=str)} if shared else {}),
-                )
-            )
         expected = sum(c["seeds_per_block"] for c in cases) * 2
         self.evidence(
             record(

@@ -1,4 +1,4 @@
-"""C1-lite retains measurement semantics without full tensor copies or OOM."""
+"""C2 retains measurement semantics without full tensor copies or OOM."""
 
 import numpy as np
 from qiskit import QuantumCircuit

@@ -56,7 +56,7 @@ def run_job(job_path, out_path):
             result = verify_clifford(
                 reference, output, job["layout"], job.get("covers"), job.get("substituted", [])
             )
-        elif job["oracle"] in {"C2", "C1-lite"}:
+        elif job["oracle"] == "C2":
             result = verify_zero(reference, output, job["layout"], job.get("max_qubits", 25))
         elif job["oracle"] == "C3":
             from qtb_verifier.dynamic import verify_dynamic

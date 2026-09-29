@@ -51,7 +51,7 @@ def parser():
     )
     compile_.add_argument("--results-root", type=Path, default=Path("results"))
     helps = {
-        "quality": "quality compiles, C0, C6, C1-lite, the audit and the gate",
+        "quality": "quality compiles, C0, C6, the audit and the gate",
         "correctness": "C1-C5, API contracts and C7 (only when the gate is open)",
         "unit-tests": "optional upstream Python and Rust tests (only when the gate is open)",
         "cost": "timing and memory panels on a quiet host (gate open, correctness passed)",

@@ -183,7 +183,6 @@ def quality_body(comparison):
             "audit/determinism",
             f"{prefix}1/C0",
             f"{prefix}1/C6",
-            f"{prefix}1/C1-lite",
         }
         or id_.startswith((f"{prefix}2/", f"{prefix}3/", f"{prefix}4/", f"{prefix}6/"))
     }

@@ -336,7 +336,7 @@ One JSON object per compile of a quality case (schema `observation.json`, format
 | `id` | Hash of case, case definition, build, revision, seed and block |
 | `case_id`, `case_hash`, `revision`, `build_id`, `seed`, `seed_block` | Which compile this is |
 | `D2`, `N2` | Metrics computed by the harness (absent if the compile failed or the circuit is dynamic) |
-| `checks` | C0 always; C6 and C1-lite where applicable. Each has `oracle`, `status`, and details. A `mismatch` of C0 or C6 has a `witness` (the evidence that decides whether a baseline and a candidate failure are the same). C6 lists its `snapshots` (stage, output, hash and the job that wrote them); C1-lite has `union_width` and `max_width` |
+| `checks` | C0 always; C6 where applicable. Each has `oracle`, `status`, and details. A `mismatch` of C0 or C6 has a `witness` (the evidence that decides whether a baseline and a candidate failure are the same). C6 lists its `snapshots` (stage, output, hash and the job that wrote them); archived C1-lite records retain their historical `union_width` and `max_width` |
 | `output`, `output_hash`, `layout` | Path and hash of the canonical output, and its layout arrays |
 | `fingerprint` | Pass names per stage and readable search budgets (`unknown` when unreadable) |
 | `worker` | The worker's raw result, including `compile_ns`, `status`/`error`, the `snapshots` (C6 inputs) and the pass `trace` (one `[pass, stage, DAG size, layout digest]` per executed pass). `snapshot_errors` names each snapshot that could not be captured or exported; the output stands and C6 is `unverified`. A timed-out seed has `timed_out`, `timeouts` and one entry per attempt in `attempts` (`timeout_s`, `load_per_cpu`); a seed that finished on its retry has `timeout_retries: 1` |

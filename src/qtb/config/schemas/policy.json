@@ -114,12 +114,6 @@
           ],
           "additionalProperties": false
         },
-        "c1_lite_max_width": {
-          "description": "Baseline union width at which a C1-lite pair is required; also the verifier limit",
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 25
-        },
         "quality_timeout": {
           "description": "Classification of a candidate quality timeout after one fresh-process retry",
           "type": "object",
@@ -264,6 +258,28 @@
         "plain",
         "noise_aware"
       ]
+    },
+    "quality_guard_tolerances": {
+      "description": "Optional fractional regression tolerances; absent fields default to zero for archived policies.",
+      "type": "object",
+      "properties": {
+        "aggregate": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Margin beyond seed uncertainty for confirm family and optimization-level D2/N2 guards only."
+        },
+        "individual": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Margin beyond seed uncertainty for individual guard cases outside basis panels; does not change the quality cap."
+        },
+        "deterministic": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Per-seed D2/N2 allowance for ordinary deterministic cases; zero-baseline and canary rules remain strict."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "required": [

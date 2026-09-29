@@ -125,7 +125,7 @@ def test_policy_and_job_reject_invalid_timing_protocol():
     bad_policy["measurement_protocol"]["quality_batch_size"] = 101
     with pytest.raises(HarnessError, match="quality_batch_size"):
         validate("policy", bad_policy)
-    for key, value in (("c1_lite_max_width", 26), ("companion_seeds", [1, 1]),
+    for key, value in (("companion_seeds", [1, 1]),
                        ("audit_fraction", 0)):
         bad_policy = deepcopy(policy)
         bad_policy["measurement_protocol"][key] = value
@@ -180,6 +180,29 @@ def test_shipped_profiles_screen_then_measure_at_their_own_full_count():
             "screen_fraction": 0.5,
         }
         assert not any(id_.startswith("calibration/") for id_ in policy["required_ids"])
+
+
+@pytest.mark.parametrize("scope", ["aggregate", "individual", "deterministic"])
+@pytest.mark.parametrize("value", [-0.01, "0.05", None])
+def test_quality_guard_tolerances_reject_invalid_values(scope, value):
+    _, policy, _ = load_profile("confirm-profile", verify=False)
+    policy["quality_guard_tolerances"][scope] = value
+    with pytest.raises(HarnessError, match=scope):
+        validate("policy", policy)
+
+
+def test_quality_guard_policy_defaults_and_scope():
+    _, policy, _ = load_profile("confirm-profile", verify=False)
+    assert policy["quality_guard_tolerances"] == {
+        "aggregate": 0.05, "individual": 0.15, "deterministic": 0.25,
+    }
+    assert "c1_lite_max_width" not in policy["measurement_protocol"]
+    assert "CA1/C1-lite" not in policy["required_ids"]
+    validate("policy", dict(policy, quality_guard_tolerances={}))
+    with pytest.raises(HarnessError, match="unexpected"):
+        validate("policy", dict(policy, quality_guard_tolerances={"unexpected": 0.05}))
+    _, iterations, _ = load_profile("iterations-profile", verify=False)
+    assert "quality_guard_tolerances" not in iterations
 
 
 def test_a_required_cost_panel_needs_cases(tmp_path):

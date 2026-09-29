@@ -5,8 +5,8 @@ differently from run to run on targets without error rates (design/updated_confi
 section 3). Before version 7 these cases failed C6 at levels 1 and 2 (the full compile and
 the routing prefixes were separate compiles) and left the determinism audit unresolved.
 Now C6 replays snapshots of the compile itself and the audit accepts only a proven VF2
-tie, so an A/A of the harness checks must pass: C0, C6, C1-lite, completeness and the
-audit, through the real worker, check processes and verifier.
+tie, so an A/A of the harness checks must pass: C0, C6, completeness and the
+audit, through the real worker, check processes.
 
 VF2Layout has the same ties where it finds a perfect layout: on ``queko_bigd_20/tokyo_20``
 at levels 1–3 it places the idle qubits differently on nearly every recompile, with the same
@@ -126,7 +126,7 @@ def test_c6_passes_on_every_seed_of_the_former_failures(smoke):
 def test_an_aa_of_the_harness_checks_is_clean(smoke):
     comparison, _, _ = smoke
     records = {r["id"]: r for r in comparison.records}
-    for id_ in ("CA1/C0", "CA1/C6", "CA1/C1-lite", "CA6/completeness", "audit/determinism"):
+    for id_ in ("CA1/C0", "CA1/C6", "CA6/completeness", "audit/determinism"):
         assert records[id_]["result"] == "passed", records[id_]
     assert not [r for r in comparison.records if r["result"] == "failed"]
     # The audit found VF2 ties on these targets and proved each of them.
@@ -141,17 +141,8 @@ def test_an_aa_of_the_harness_checks_is_clean(smoke):
     assert decision == "NO_IMPROVEMENT"
 
 
-def test_c1_lite_pairs_are_verified_within_the_width_limit(smoke):
+def test_quality_does_not_run_the_semantic_verifier(smoke):
     comparison, _, rows = smoke
-    lite = [c for row in rows for c in row["checks"] if c["oracle"] == "C1-lite"]
-    assert lite and all(c["union_width"] <= 22 for c in lite if c["status"] == "verified")
+    assert {c["oracle"] for row in rows for c in row["checks"]} == {"C0", "C6"}
+    assert not list((comparison.directory / "oracle-jobs").glob("*/job.json"))
     assert Path(comparison.directory / "observations.jsonl").exists()
-
-
-def test_the_verifier_receives_the_frozen_width_limit(smoke):
-    from qtb.canonical import read_json
-
-    comparison, _, _ = smoke
-    jobs = [read_json(p) for p in (comparison.directory / "oracle-jobs").glob("*/job.json")]
-    lite = [job for job in jobs if job["oracle"] == "C1-lite"]
-    assert lite and {job["max_qubits"] for job in lite} == {22}

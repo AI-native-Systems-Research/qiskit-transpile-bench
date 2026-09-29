@@ -131,7 +131,6 @@ def split_evidence(evidence, profile="iterations-profile"):
         f"{prefix}1/C0": "quality",
         f"{prefix}1/C6": "quality",
         f"{prefix}6/completeness": "quality",
-        "CA1/C1-lite": "quality",
     }
     stages = {}
     for row in evidence:
@@ -377,6 +376,7 @@ def _cap_record(rule, differences, role="scored"):
     manifest, policy, rows, evidence = synthetic("confirm-profile", ratio=1.0)
     # Exercise the archived 5% policy independently of the current shipped cap.
     policy["quality_cap"] = 1.05
+    policy.pop("quality_guard_tolerances", None)
     if rule is None:
         policy.pop("quality_cap_rule", None)
     else:
@@ -443,3 +443,114 @@ def test_noise_aware_cap_keeps_independent_guard_check():
     assert record_["result"] == "failed"
     scored = _cap_record("noise_aware", _alternating(math.log(1.03), 0.001), "scored")
     assert scored["result"] == "passed"
+
+
+@pytest.mark.parametrize("metric", ["D2", "N2"])
+@pytest.mark.parametrize("ratio,expected", [
+    (1.04, "passed"), (1.05, "passed"), (1.06, "failed"),
+])
+def test_confirm_aggregate_margin_is_only_for_family_and_level(metric, ratio, expected):
+    manifest, policy, rows, evidence = synthetic("confirm-profile", ratio=1.0)
+    for case in manifest["cases"]:
+        if case["role"] in {"scored", "guard"}:
+            _set_case_differences(
+                rows, case["case_id"], [math.log(ratio)] * case["seeds_per_block"], metric
+            )
+    records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
+    by_id = {r["id"]: r for r in records}
+    for scope in ("family/G8", "optimization_level/0"):
+        result = by_id[f"CA4/{scope}/{metric}"]
+        assert result["result"] == expected
+        assert result["threshold"] == math.log1p(0.05)
+    assert by_id[f"CA3/cx/{metric}"]["result"] == "failed"
+    assert by_id[f"CA3/ecr/{metric}"]["result"] == "failed"
+    if metric == "N2":
+        assert by_id["CA3/primary/N2"]["result"] == "failed"
+    else:
+        assert by_id["CA2/improvement"]["result"] == "failed"
+        assert by_id["CA3/breadth"]["result"] == "failed"
+
+
+@pytest.mark.parametrize("ratio,spread,cap,expected", [
+    (1.14, 0, 2.0, "passed"),
+    (1.15, 0, 2.0, "passed"),
+    (1.16, 0, 2.0, "failed"),
+    (1.17, 0.2, 2.0, "passed"),  # The margin is statistical, not a hard ratio cap.
+    (1.14, 0, 1.10, "failed"),  # The independent hard cap still applies.
+])
+def test_confirm_individual_margin_and_cap(ratio, spread, cap, expected):
+    manifest, policy, rows, evidence = synthetic("confirm-profile")
+    policy["quality_cap"] = cap
+    case = next(c for c in manifest["cases"] if c["role"] == "guard" and not c.get("panel"))
+    _set_case_differences(rows, case["case_id"], _alternating(math.log(ratio), spread))
+    records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
+    result = next(r for r in records if r["id"] == f"CA4/cap/{case['case_id']}/D2")
+    assert result["result"] == expected
+    assert result["guard_tolerance"] == 0.15
+    assert result["cap_breached"] == (ratio > cap)
+
+
+@pytest.mark.parametrize("metric", ["D2", "N2"])
+@pytest.mark.parametrize("ratio,expected", [(1.25, "passed"), (1.26, "failed")])
+def test_deterministic_allowance_is_checked_on_every_seed_and_metric(metric, ratio, expected):
+    manifest, policy, rows, evidence = synthetic("confirm-profile")
+    case = next(c for c in manifest["cases"] if c["role"] == "deterministic")
+    for row in rows:
+        if row["case_id"] == case["case_id"] and row["revision"] == "evolved":
+            # Improvements elsewhere must not cancel one seed beyond the allowance.
+            row[metric] *= ratio if row["seed"] == 0 else 0.5
+    records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
+    result = next(r for r in records if r["id"] == f"CA4/exact/{case['case_id']}")
+    assert result["result"] == expected
+    assert result["tolerance"] == 0.25
+
+
+@pytest.mark.parametrize("role,expected", [("zero_baseline", "failed"), ("canary", "unresolved")])
+def test_deterministic_allowance_does_not_relax_special_cases(role, expected):
+    manifest, policy, rows, evidence = synthetic("confirm-profile")
+    case = next(c for c in manifest["cases"] if c["role"] == role)
+    for row in rows:
+        if row["case_id"] == case["case_id"] and row["revision"] == "evolved" and row["seed"] == 0:
+            row["N2"] += 1
+    records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
+    result = next(r for r in records if r["id"] == f"CA4/exact/{case['case_id']}")
+    assert result["result"] == expected
+    assert result["tolerance"] == 0
+
+
+def test_archived_policy_keeps_zero_margins():
+    manifest, policy, rows, evidence = synthetic("confirm-profile", ratio=1.01)
+    policy.pop("quality_guard_tolerances")
+    case = next(c for c in manifest["cases"] if c["role"] == "deterministic")
+    for row in rows:
+        if row["case_id"] == case["case_id"] and row["revision"] == "evolved":
+            row["D2"] += 1
+    records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
+    by_id = {r["id"]: r for r in records}
+    assert by_id["CA4/family/G8/N2"]["result"] == "failed"
+    assert by_id["CA4/optimization_level/0/N2"]["result"] == "failed"
+    assert by_id[f"CA4/exact/{case['case_id']}"]["result"] == "failed"
+    assert all(
+        r["result"] == "failed" and r["guard_tolerance"] == 0
+        for r in records if "guard_tolerance" in r
+    )
+
+
+def test_confirm_quality_report_exposes_active_tolerances(tmp_path):
+    from qtb.canonical import read_json
+    from qtb.reporter import write_quality_report
+
+    manifest, policy, rows, evidence = synthetic("confirm-profile")
+    records, required, summaries = evaluate_quality(manifest, policy, rows, evidence)
+    write_quality_report(
+        tmp_path,
+        {"profile": "confirm-profile", "hashes": {"manifest": "m", "policy": "p"},
+         "run_id": "test"},
+        records, required, summaries, rows, manifest, policy, "improved", "quality passed",
+    )
+    assert read_json(tmp_path / "report.json")["quality_guard_tolerances"] == {
+        "aggregate": 0.05, "individual": 0.15, "deterministic": 0.25,
+    }
+    text = (tmp_path / "report.md").read_text()
+    assert "family/level 5.0%, individual guards 15.0%" in text
+    assert "ordinary deterministic cases 25.0% on each seed" in text

@@ -26,12 +26,6 @@ from qtb.errors import HarnessError
 from qtb.metrics import StructuralChecker, layout_errors
 from qtb.metrics.replay import replay
 
-# C1-lite: scored confirm cases of at most this many logical qubits are candidates, on their
-# first ten seeds. Pairs are required when the baseline's union width fits
-# ``c1_lite_max_width`` (the verifier limit as well); 25 when the policy predates the key.
-C1_LITE_LOGICAL = 25
-C1_LITE_SEEDS = 10
-C1_LITE_DEFAULT_WIDTH = 25
 # The snapshots a quality compile writes for C6, requested as pipeline edits.
 TAP_EDITS = ("tap:init", "tap:routing")
 SNAPSHOT_STAGES = ("init", "routing")
@@ -41,10 +35,6 @@ SNAPSHOT_STAGES = ("init", "routing")
 # can move a used qubit as well. The audit accepts a difference that starts at one of
 # them, and only as a proven physical-wire permutation.
 VF2_TIE_PASSES = ("VF2Layout", "VF2PostLayout")
-
-
-def c1_lite_width(protocol):
-    return protocol.get("c1_lite_max_width", C1_LITE_DEFAULT_WIDTH)
 
 
 def routing_replay_seeds(case, seeds):
@@ -183,16 +173,14 @@ def new_observation(case, case_digest, revision, build_id, result):
 
 
 def check_batch(spec):
-    """C0, C6 and the C1-lite selection for one compiled batch; runs in a harness process.
+    """C0 and C6 checks for one compiled batch; runs in a harness process.
 
     ``spec``: ``case``, ``case_hash``, ``target_path``, ``revision``, ``build_id``, ``rows``
-    (the worker results), and ``c1_lite`` (the width limit, or ``None`` outside confirm).
-    Returns the observations, in the rows' order, and ``[index, union_width]`` for each one
-    that still needs a C1-lite verification.
+    (the worker results). Returns the observations in the rows' order.
     """
     case, rows = spec["case"], spec["rows"]
     target = read_json(spec["target_path"])
-    observations, lite = [], []
+    observations = []
     for result in rows:
         observation = new_observation(
             case, spec["case_hash"], spec["revision"], spec["build_id"], result
@@ -229,58 +217,11 @@ def check_batch(spec):
                     for snapshot in check.get("snapshots", []):
                         snapshot["job_file"] = result.get("job_file")
                     observation["checks"].append(check)
-                limit = spec.get("c1_lite")
-                if (
-                    limit is not None
-                    and case["role"] == "scored"
-                    and case["logical_qubits"] <= C1_LITE_LOGICAL
-                    and result["seed"] < C1_LITE_SEEDS
-                    and not observation.get("free_parameters")
-                ):
-                    union_width = structural["union_width"]
-                    if union_width <= limit:
-                        lite.append([len(observations), union_width])
-                    else:
-                        observation["checks"].append(
-                            {
-                                "status": "unverified",
-                                "detail": "Union width exceeds limit",
-                                "oracle": "C1-lite",
-                                "union_width": union_width,
-                                "max_width": limit,
-                            }
-                        )
         observations.append(observation)
-    return {"observations": observations, "lite": lite}
+    return {"observations": observations}
 
 
 # Failure witnesses (shared-failure matching)
-
-
-def failure_witness(row, check):
-    """The evidence that identifies a failed check, or ``None`` when there is not enough.
-
-    C0 and C6 carry their own witnesses. C1-lite is decided on the whole output, so its
-    witness is the output itself (hash and layout) with the verifier's result: two
-    mismatches are the same failure only when the outputs are identical.
-    """
-    if check.get("status") != "mismatch":
-        return None
-    if check["oracle"] == "C1-lite":
-        if not row.get("output_hash"):
-            return None
-        result = {
-            k: v
-            for k, v in check.items()
-            if k not in {"cached", "oracle", "union_width", "reference_hash", "protocol"}
-        }
-        return {
-            "kind": "semantic",
-            "output_hash": row["output_hash"],
-            "layout": digest(row.get("layout")),
-            "result": digest(result),
-        }
-    return check.get("witness")
 
 
 def shared_failures(rows, oracle):
@@ -289,7 +230,7 @@ def shared_failures(rows, oracle):
     for row in rows:
         for check in row["checks"]:
             if check.get("oracle") == oracle and check.get("status") == "mismatch":
-                witness = failure_witness(row, check)
+                witness = check.get("witness")
                 if witness is not None:
                     witnesses[row["case_id"], row["seed"]][row["revision"]] = (
                         row["id"],

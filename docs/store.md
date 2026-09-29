@@ -20,7 +20,7 @@ uses that store. See [layout](#layout) below.
 | --- | --- | --- |
 | `builds/<key>/` | Build identity and the harness wheel hash | `compile` built it and it passed verification |
 | `wheels/<identity>/` | Build identity | The Rust compile of a baseline finished |
-| `quality/<key>/` | Build ID, case definition, CPU model of the `quality` host, worker protocol, harness, quality measurement protocol (including the batch schedule, the C1-lite width limit and the timeout rule, but not cost-only settings), seed block and mode, worker environment | Per seed. A failed determinism audit writes `invalidated.json` into the matching entries, which are then never read |
+| `quality/<key>/` | Build ID, case definition, CPU model of the `quality` host, worker protocol, harness, quality measurement protocol (including the batch schedule and timeout rule, but not cost-only settings), seed block and mode, worker environment | Per seed. A failed determinism audit writes `invalidated.json` into the matching entries, which are then never read |
 | `correctness/<key>/` | Build ID, implementation, harness, correctness-suite file, manifest and policy hashes, verifier identity, CPU model of the `correctness` host, worker environment, Clifford seed count and mode (the policy's `clifford_seeds` and `clifford_full_mode`), tolerances | Every baseline check (C1–C5, API contracts, C7) is decisive (`verified` or `mismatch`) and no worker failed or timed out |
 | `unit-tests/<key>/` | Build ID, harness, `dev-tests.lock`, the baseline test tree (`test/` files of the snapshot), test budgets, CPU model, worker environment | Both baseline suites completed |
 

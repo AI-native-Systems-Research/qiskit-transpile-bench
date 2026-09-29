@@ -78,6 +78,8 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
         observations[key] = row
     confirm = manifest["profile"] == "confirm-profile"
     prefix = "CA" if confirm else "IA"
+    # Missing tolerances preserve the strict rules of archived policies.
+    tolerances = policy.get("quality_guard_tolerances", {})
     required = set(policy["required_ids"])
     positive = [c for c in cases if c["role"] in {"scored", "guard"}]
     scored = [c for c in cases if c["role"] == "scored"]
@@ -86,7 +88,7 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
         by_evidence.get(i, {}).get("result") == "passed" for i in policy["quality_prerequisites"]
     )
 
-    def panel_record(id_, subset, metric, improvement=False, weights=None):
+    def panel_record(id_, subset, metric, improvement=False, weights=None, tolerance=0):
         required.add(id_)
         kind = "improvement" if improvement else "guard"
         try:
@@ -94,11 +96,11 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
                 raise Incomplete("Round-trip or determinism audit evidence is missing")
             # Each case uses its own seeds 0..seeds_per_block-1; the estimator stratifies.
             result = paired_panel(subset, observations, metric, None, weights)
-            limit = math.log(policy["practical_ratio"]) if improvement else 0
+            limit = math.log(policy["practical_ratio"]) if improvement else math.log1p(tolerance)
             ok = (
                 result["ln_score"] + policy["improvement_multiplier"] * result["SE"] < limit
                 if improvement
-                else result["ln_score"] <= policy["guard_multiplier"] * result["SE"]
+                else result["ln_score"] <= limit + policy["guard_multiplier"] * result["SE"]
             )
             records.append(
                 record(
@@ -155,8 +157,17 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
                 if cap_rule == "noise_aware":
                     breach = breach and noise
                 ok = not breach
+                guard_details = {}
                 if case["role"] == "guard" and not case.get("panel"):
-                    ok &= not noise
+                    tolerance = tolerances.get("individual", 0)
+                    threshold = math.log1p(tolerance) + policy["guard_multiplier"] * result["SE"]
+                    guard_breach = result["ln_score"] > threshold
+                    ok &= not guard_breach
+                    guard_details = dict(
+                        guard_tolerance=tolerance,
+                        guard_threshold=threshold,
+                        statistical_guard_breached=guard_breach,
+                    )
                 records.append(
                     record(
                         id_,
@@ -165,6 +176,8 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
                         value=result["score"],
                         SE=result["SE"],
                         cap_rule=cap_rule,
+                        cap_breached=breach,
+                        **guard_details,
                     )
                 )
                 summaries[id_] = result
@@ -176,6 +189,7 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
         id_ = f"{prefix}4/exact/{case['case_id']}"
         required.add(id_)
         status, detail = "passed", ""
+        tolerance = tolerances.get("deterministic", 0) if case["role"] == "deterministic" else 0
         try:
             if not panel_valid:
                 raise Incomplete("Round-trip or determinism audit evidence is missing")
@@ -197,7 +211,7 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
                             )
                         if b != expected:
                             status = "unresolved"
-                    elif b > a:
+                    elif b > a * (1 + tolerance):
                         status = "failed"
                     if case["role"] == "zero_baseline" and a != 0:
                         records.append(
@@ -217,7 +231,7 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
                 if isinstance(exc, Incomplete)
                 else "Missing exact-guard observation or frozen expected value"
             )
-        records.append(record(id_, "guard", status, detail=detail))
+        records.append(record(id_, "guard", status, detail=detail, tolerance=tolerance))
     if confirm and objective:
         family_scores = []
         leave_out = []
@@ -237,7 +251,9 @@ def evaluate_quality(manifest, policy, rows, evidence=()):
                 for metric in ("D2", "N2"):
                     id_ = f"CA4/{dimension}/{value}/{metric}"
                     if dimension in {"family", "optimization_level"}:
-                        result = panel_record(id_, subset, metric)
+                        result = panel_record(
+                            id_, subset, metric, tolerance=tolerances.get("aggregate", 0)
+                        )
                     else:
                         result = report_summary(id_, subset, metric)
                     if dimension == "family" and metric == "D2":

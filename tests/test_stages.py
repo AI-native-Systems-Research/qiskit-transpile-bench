@@ -73,6 +73,12 @@ def test_quality_saves_detailed_reports_before_decide(world, ratio, audit, expec
     assert saved["format"] == "qtb-quality-report/1"
     assert saved["gate"] == expected_gate
     assert saved["quality_cap"] == 2.0
+    policy = read_json(root / "policy.json")
+    assert saved["quality_guard_tolerances"] == {
+        scope: policy.get("quality_guard_tolerances", {}).get(scope, 0)
+        for scope in ("aggregate", "individual", "deterministic")
+    }
+    assert "Quality guard tolerances:" in markdown
     assert saved["gate_reason"] == read_state(root, "quality")["gate_reason"]
     assert sum(saved["constraint_counts"].values()) == len(saved["constraints"])
     assert saved["families"]
@@ -647,7 +653,9 @@ def test_a_missing_store_entry_stops_later_stages(world):
 def test_version_five_policies_need_no_qualification():
     for profile in ("iterations-profile", "confirm-profile"):
         manifest, policy, _ = load_profile(profile, verify=False)
-        assert policy["version"] == manifest["version"] == 10
+        assert policy["version"] == manifest["version"] == (
+            12 if profile == "confirm-profile" else 10
+        )
         assert "harness/qualification" not in policy["required_ids"]
         assert not any(i.endswith("1/upstream") for i in policy["required_ids"])
         assert "qualification" not in policy and "status" not in manifest

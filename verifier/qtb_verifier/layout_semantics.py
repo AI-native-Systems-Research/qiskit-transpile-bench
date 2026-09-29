@@ -1,4 +1,4 @@
-"""C2/C1-lite: zero-input states and terminal measurement instruments."""
+"""C2: zero-input states and terminal measurement instruments."""
 
 import math
 
@@ -130,7 +130,7 @@ def verify_zero(logical, output, layout, max_qubits=25):
         expected, output, final[: logical.num_qubits] + initial[: logical.num_qubits]
     )
     result = {
-        "oracle": "C1-lite",
+        "oracle": "C2",
         "input_domain": "all_zero",
         "covers": STAGES,
         "substituted": [],

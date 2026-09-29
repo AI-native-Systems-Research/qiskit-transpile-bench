@@ -1,5 +1,8 @@
 # Implementation and runner validation
 
+Historical results below include C1-lite, which confirm version 12 removes. Its shared
+simulation and memory-budget tests now exercise the C2 correctness oracle.
+
 [Documentation index](README.md)
 
 The implementation originated from `design/transpilation-benchmark-impl-plan.md`; the

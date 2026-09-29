@@ -13,7 +13,6 @@ from qtb.coordinator import Comparison
 from qtb.coordinator.quality import (
     audit_check,
     equivalent_under,
-    failure_witness,
     shared_failures,
     structural_result,
     wire_permutation,
@@ -381,7 +380,7 @@ def _session(tmp_path, rows):
     comparison.records = []
     comparison.prefix = "CA"
     comparison.run = {"profile": "confirm-profile"}
-    comparison.policy = {"measurement_protocol": {"c1_lite_max_width": 22}}
+    comparison.policy = {"measurement_protocol": {}}
     case = {"case_id": "case", "role": "scored", "seeds_per_block": 2}
     comparison.aggregate_checks([case], rows)
     return {r["id"]: r for r in comparison.records}
@@ -446,40 +445,17 @@ def test_c0_witnesses_distinguish_failures_with_the_same_error_text(tmp_path):
     assert a["witness"] != b["witness"]
 
 
-def test_c1_lite_failures_are_shared_only_for_identical_outputs():
-    mismatch = {"oracle": "C1-lite", "status": "mismatch", "detail": "state differs"}
+def test_quality_aggregation_only_requires_c0_c6_and_completeness(tmp_path):
     rows = [
-        _row("baseline", 0, [mismatch], output_hash="same"),
-        _row("evolved", 0, [dict(mismatch)], output_hash="same"),
-        _row("baseline", 1, [mismatch], output_hash="one"),
-        _row("evolved", 1, [dict(mismatch)], output_hash="another"),
-    ]
-    assert failure_witness(rows[0], mismatch)["output_hash"] == "same"
-    assert set(shared_failures(rows, "C1-lite")) == {("case", 0)}
-
-
-def test_c1_lite_pairs_follow_baseline_eligibility_and_report_overruns(tmp_path):
-    def lite(status, width):
-        return {"oracle": "C1-lite", "status": status, "union_width": width}
-
-    rows = [
-        # Eligible, both verified.
-        _row("baseline", 0, [lite("verified", 20)]), _row("evolved", 0, [lite("verified", 21)]),
-        # Eligible baseline; the candidate widened past the limit: the pair stays open.
-        _row("baseline", 1, [lite("verified", 22)]),
-        _row("evolved", 1, [lite("unverified", 24)]),
+        _row(revision, seed, [
+            {"oracle": "C0", "status": "verified"},
+            {"oracle": "C6", "status": "verified"},
+        ])
+        for revision in ("baseline", "evolved") for seed in range(2)
     ]
     records = _session(tmp_path, rows)
-    lite_record = records["CA1/C1-lite"]
-    assert lite_record["result"] == "unresolved"
-    assert lite_record["eligible_observations"] == 2
-    assert lite_record["unverified_pairs"] == [["case", 1]]
-    assert lite_record["evolved_width_overruns"] == [["case", 1]]
-    # A baseline wider than the limit is excluded and counted, not required.
-    rows[2] = _row("baseline", 1, [lite("unverified", 23)])
-    lite_record = _session(tmp_path / "again", rows)["CA1/C1-lite"]
-    assert lite_record["result"] == "passed"
-    assert lite_record["baseline_width_exclusions"] == 1
+    assert set(records) == {"CA1/C0", "CA1/C6", "CA6/completeness"}
+    assert all(r["result"] == "passed" for r in records.values())
 
 
 def test_shared_failure_needs_a_witness(tmp_path):

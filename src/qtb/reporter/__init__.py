@@ -534,6 +534,10 @@ def write_quality_report(
         "quality_status": decision["status"],
         "quality_cap": policy["quality_cap"],
         "quality_cap_rule": policy.get("quality_cap_rule", "plain"),
+        "quality_guard_tolerances": {
+            scope: policy.get("quality_guard_tolerances", {}).get(scope, 0)
+            for scope in ("aggregate", "individual", "deterministic")
+        },
         "overall": {
             "D2": score(f"{prefix}2/improvement"),
             "N2": score(f"{prefix}3/primary/N2"),
@@ -559,6 +563,13 @@ def write_quality_report(
         "run `decide` for the final benchmark verdict, including correctness and cost.", "",
         f"Per-case quality cap: {policy['quality_cap']:.2f}× "
         f"(seed-aggregated; rule: {report['quality_cap_rule']}).", "",
+        "Quality guard tolerances: "
+        f"family/level {report['quality_guard_tolerances']['aggregate']:.1%}, "
+        f"individual guards {report['quality_guard_tolerances']['individual']:.1%} "
+        f"(statistical margins beyond {policy['guard_multiplier']:g} SE); "
+        f"ordinary deterministic cases {report['quality_guard_tolerances']['deterministic']:.1%} "
+        "on each seed. Overall N2 and basis-panel guards retain zero margin; "
+        "zero-baseline and canary checks remain strict.", "",
         "Overall scores cover the primary scored panel using frozen weights. Family and "
         "other marginal scores normalize those weights within their scored subset. "
         "Ratios below 1 improve on baseline; paired standard errors are in log space. "

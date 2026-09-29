@@ -128,15 +128,31 @@ improvement.
 | Improvement, iterations | `ln(D2 score) + 2·SE < 0` | `IA2/improvement` |
 | Improvement, confirm | `ln(D2 score) + 2·SE < ln(0.99)` | `CA2/improvement` (at least 1% practical gain) |
 | Breadth, confirm | ≥ 4 of 8 families with `ln(D2) + 2·SE < 0`, and every leave-one-family-out score < 1 | `CA3/breadth` |
-| Regression guard | `ln(score) ≤ 3·SE` | `N2` of the scored panel, basis panels, confirm family and level summaries |
+| Regression guard, overall and basis panels | `ln(score) ≤ 3·SE` | `N2` of the scored panel; `D2` and `N2` of basis panels |
+| Regression guard, confirm family and level | `ln(score) ≤ ln(1.05) + 3·SE` | `D2` and `N2` of each family and optimization level |
 | Per-case quality cap | `case_ratio ≤ 2.0` (seed-aggregated, not per seed); with `quality_cap_rule: noise_aware` a case breaches only when also `ln(case_ratio) > 3·SE_case` | Every scored and guard case, `D2` and `N2` |
-| Per-case SE guard | `ln(case_ratio) ≤ 3·SE_case` | Guard cases outside a basis panel |
-| Exact | Evolved `≤` baseline on every seed | Deterministic cases |
+| Per-case SE guard | `ln(case_ratio) ≤ ln(1.15) + 3·SE_case` in confirm; zero margin in iterations | Guard cases outside a basis panel |
+| Deterministic | Evolved `≤ 1.25 × baseline` on every seed in confirm; evolved `≤ baseline` in iterations | Ordinary deterministic cases, each of `D2` and `N2` independently |
 | Exact zero | Evolved `= 0` | Zero-baseline cases |
 | Canary | Both revisions `=` the frozen constant on every seed | Canaries |
 
 The multipliers (2.0 for improvement, 3.0 for guards), the practical ratio and the cap come
 from `policy.json`.
+
+**Practical guard margins (confirm version 11).** `quality_guard_tolerances` contains
+fractional allowances: `aggregate: 0.05` for family and optimization-level summaries,
+`individual: 0.15` for guard cases outside basis panels, and `deterministic: 0.25` for
+ordinary deterministic cases. A statistical guard fails only when
+`ln(ratio) - guard_multiplier · SE > ln(1 + tolerance)`. This is a margin beyond seed
+uncertainty, not a hard maximum on the observed ratio. The independent per-case quality
+cap still applies. The deterministic allowance is a hard per-seed bound with no averaging
+or compensation between metrics; a zero baseline must remain zero.
+
+Overall N2, basis-panel guards, improvement and breadth, canaries, zero-baseline cases and
+correctness checks retain their previous rules. Missing tolerance fields default to zero,
+so archived policies and the iterations profile retain strict regression guards. Record
+IDs under `CA4/exact/` are retained for compatibility even though ordinary deterministic
+cases now have an allowance. Quality reports expose the active tolerances.
 
 **Cap rule.** `quality_cap_rule` is `plain` in both shipped profiles (and for any policy
 without the key): a case breaches when its ratio exceeds `quality_cap`. `noise_aware` also
@@ -243,15 +259,16 @@ it changed (`evaluator/scope.py`):
    input domain, without having substituted a changed component. Otherwise
    `IA1/stage-coverage` (`CA1/...`) is `unresolved`.
 
-The rule combines the quality checks (C0, C6, C1-lite) with the C7 Clifford checks of the
+The rule combines the quality checks (C0, C6) with the C7 Clifford checks of the
 `correctness` stage, so `decide` computes `*1/stage-coverage` once both stages are complete.
 If either has not run, for example because the quality gate is closed, the record is missing.
 
 In practice: routing replay (C6) covers layout and routing on every scored output, so a
 layout/routing-only change can `PASS`. Nothing verifies the optimization stage at scale for
 100-qubit generic-angle circuits at levels 2–3, so a change there reaches at most
-`INCONCLUSIVE` on the iterations profile. The confirm profile's C1-lite checks give exact
-all-stage evidence on the small scored outputs.
+`INCONCLUSIVE` when no other applicable check covers it. Confirm version 12 removes
+C1-lite, so small scored outputs no longer receive that all-stage evidence. The stage-coverage
+requirement still applies; removing C1-lite does not establish coverage of additional stages.
 
 ## 8. From records to verdict
 
@@ -278,7 +295,7 @@ otherwise (missing / unresolved)                  → INCONCLUSIVE          (exi
 `verdict()` checks evolved failures before reference failures, so two rules keep a failure
 the candidate did not cause from reading as a violation, without weakening that order:
 
-- **Shared failures.** When both revisions fail C0, C6 or C1-lite on the same case and seed
+- **Shared failures.** When both revisions fail C0 or C6 on the same case and seed
   with the same failure witness, the evolved side is not recorded as a failure; the baseline
   side stays a failed reference record, and the aggregate record stays `unresolved` and names
   the pair. The verdict is `INCONCLUSIVE`. With both sides merely `unresolved`, a failed

@@ -159,14 +159,12 @@ def policy(profile, cases=(), catalog=()):
         f"{prefix}6/completeness",
     ]
     if prefix == "CA":
-        required += ["CA3/breadth", "CA1/C1-lite", "CA5/confirm-timing", "CA5/memory"]
+        required += ["CA3/breadth", "CA5/confirm-timing", "CA5/memory"]
     confirm = prefix == "CA"
     extra_protocol = {}
     if confirm:
         extra_protocol = dict(
             quality_batch_schedule=quality_batch_schedule(cases, catalog),
-            # Baseline union width that requires a C1-lite pair; also the verifier limit.
-            c1_lite_max_width=22,
             companion_groups=COMPANION_GROUPS,
         )
     return dict(

@@ -84,7 +84,6 @@ feed the [stage-coverage rule](metrics.md#7-change-scope-and-stage-coverage).
 | API | Pass-manager contracts | Level-2 fixtures | Worker `api_checks` mode, judged by the coordinator | — |
 | C6 | Routing replay | Every scored and basis-guard seed; 10 seeds of other static guards | Harness check process (`metrics/replay.py`) | Pure Python, exact |
 | C7 | Clifford variants at full scale | `clifford_seeds` of the 100-qubit circuits' Clifford variants: 3 (iterations) or 5 (confirm) | Verifier (`small_exact.py`) | Stabilizer tableaux |
-| C1-lite | Zero-input state equivalence of scored outputs | Confirm profile: scored cases ≤ 25 qubits, first 10 seeds; required when the baseline's union width is at most 22 | Verifier (`layout_semantics.py`) | Statevectors / measurement branches |
 
 ### C0: structure (every output)
 
@@ -217,37 +216,17 @@ translation (and optimization, in full mode) at full width, which does not need 
   init, layout, routing and translation, with unitary synthesis recorded as **substituted**.
   This is the variant `IA1/C7` requires.
 
-### C1-lite (confirm profile)
+### Removed quality-stage check
 
-This checks what the scored compilation actually promises: correct behavior when every
-qubit starts in `|0⟩`. Candidates are scored cases with at most 25 logical qubits and no free
-parameters, on the first 10 seeds, whose output passed C0. The verifier simulates the output
-and its laid-out reference on the union of wires that either circuit touches (never dropping a
-logical or ancilla wire):
-
-- Unmeasured circuits: equal statevectors up to global phase.
-- Terminally measured circuits: equal joint classical distributions (TVD < 1e-8) and equal
-  conditional residual states (joint trace distance < 1e-8), with an independent phase per
-  outcome.
-- More wires than `max_qubits`, or a statevector budget above 1 GiB, gives `unverified`. The
-  harness passes the policy's `c1_lite_max_width` (22); the verifier's own default is 25.
-
-A pair (case, seed) is required when the baseline's union width is at most
-`c1_lite_max_width`; both outputs must then verify. A wider or missing evolved output, or a
-verifier timeout, leaves `CA1/C1-lite` unresolved; the pair never leaves the requirement, so a
-candidate cannot escape the check by widening an incorrect output. Baselines wider than the
-limit are excluded and counted (`baseline_width_exclusions`); evolved overruns are listed
-(`evolved_width_overruns`). A mismatch is always recorded, required pair or not. At 22 wires
-about 570 of the 630 candidate observations per revision remain; `ripple_adder_10` (22 qubits
-on the 5×5 grid) keeps about a quarter of its 40, and at 25 wires its checks ran into the
-verifier's 300-second timeout.
-
-Trotter inputs are compared against a frozen product-formula reference circuit, not the exact
-exponential. C1-lite covers **all stages** for the `all_zero` input domain.
+Confirm version 12 removes C1-lite, including its width eligibility rule and required
+record. Quality now runs C0, C6 and the determinism audit. C2 still uses the zero-input
+state and terminal-measurement simulator on correctness fixtures. Archived C1-lite
+observations and reports retain their historical meaning; use the session's archived
+harness to reproduce its original rules.
 
 ## Related stages
 
-- [quality](workflow/quality.md): when C0, C6, C1-lite and the determinism audit run.
+- [quality](workflow/quality.md): when C0, C6 and the determinism audit run.
 - [correctness](workflow/correctness.md): baseline preflight, C1–C5, API contracts and C7.
 - [unit-tests](workflow/unit-tests.md): baseline-owned upstream suites, regression comparison,
   result reuse and the optional-stage rule.

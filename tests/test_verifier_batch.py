@@ -63,7 +63,7 @@ def test_a_stopped_batch_marks_only_its_current_job_unverified(tmp_path, monkeyp
     monkeypatch.setattr(Comparison, "workers", property(lambda self: 1))
     requests = [
         _request(comparison, tmp_path, "a.ops.jsonl.gz", oracle)
-        for oracle in ("C1", "C2", "C1-lite")
+        for oracle in ("C1", "C2", "C7")
     ]
     calls = []
 

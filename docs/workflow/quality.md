@@ -31,8 +31,10 @@ guards. [Metrics](../metrics.md) defines the estimators, weights and thresholds.
 | --- | --- |
 | C0 legality and layout | Every quality output |
 | C6 routing replay | Every scored and basis-guard seed; ten B0 seeds of other static guards |
-| C1-lite | Confirm: scored outputs with at most 25 logical qubits, first ten seeds; a pair is required when the baseline's union width is at most `c1_lite_max_width` (22) |
 | Completeness | All required observations and checks must exist |
+
+Confirm version 12 removes C1-lite: quality does not run statevector equivalence checks.
+Semantic verification remains in the correctness stage.
 
 See [verifier checks](../verifier.md#the-checks) for the contracts and eligibility rules. The
 compile times of these concurrent jobs never enter the cost verdict.
@@ -55,10 +57,10 @@ output and its metrics stand, and C6 is `unverified` for that seed.
 
 ### Scheduling
 
-- **Slots.** Compiles, checks, audit recompiles and C1-lite verifications share one pool of
+- **Slots.** Compiles, checks and audit recompiles share one pool of
   runnable slots: one fewer than the allocation, at most 15 (15 on the 16-slot LSF job). A
   task holds one slot while it runs and releases it before waiting for the next, and
-  checks and verification go before new compiles.
+  checks go before new compiles.
 - **Checks in harness processes.** C0, the C6 replay and the layout comparison run in a pool
   of harness processes, which read the files the worker wrote. They never import Qiskit, so
   the candidate cannot reach its own checks, and they do not share the coordinator's GIL.
@@ -70,10 +72,6 @@ output and its metrics stand, and C6 is `unverified` for that seed.
   the frozen estimate. A policy without a schedule uses `quality_batch_size`. A batch that
   crashes fails the stage at once: batches not yet started are not run, and the finished
   ones keep their checkpoints.
-- **C1-lite off the commit path.** A batch's C1-lite requests go to the verifier as soon as
-  its checks finish. A verifier that stops making progress for 300 s is killed, and the jobs
-  it left run once more in a fresh process. A second stall
-  leaves that check `unverified`, which keeps `CA1/C1-lite` unresolved and names the seed.
 
 ### Timeouts
 
@@ -127,10 +125,10 @@ are kept. Evolved observations are never stored.
 
 ## Failures both revisions share
 
-When the baseline and the candidate fail C0, C6 or C1-lite on the same case and seed with the
+When the baseline and the candidate fail C0 or C6 on the same case and seed with the
 same failure witness, the candidate inherited the failure. The witness is specific: every
 failing operation with its position for C0; the position, operation, mapping and a digest of
-the routed operations before it for C6; the output itself (hash and layout) for C1-lite. The
+the routed operations before it for C6. The
 generic status or reason alone never matches. For such a pair the baseline side stays a
 failed reference record, so the verdict is `INCONCLUSIVE`; the candidate side is not
 recorded as a failure; and the aggregate (`CA1/C6`, for example) stays `unresolved` and names
@@ -144,7 +142,7 @@ At the end of `quality`, the gate decides whether the expensive stages run. It i
 
 | Gate | When | Then |
 | --- | --- | --- |
-| `improved` | Every quality check passed (round-trip, audit, C0, C6, C1-lite, guards, caps, completeness) and every improvement record passed | `correctness`, `unit-tests` and `cost` run |
+| `improved` | Every quality check passed (round-trip, audit, C0, C6, guards, caps, completeness) and every improvement record passed | `correctness`, `unit-tests` and `cost` run |
 | `aa` | Both builds have the same ID (an A/A session) and every quality check passed | They run as a check of the harness; the cost panels are the known-outcome check |
 | `closed` | Anything else: no improvement, an unresolved improvement, or a failed or unresolved quality check | They record `skipped` with the reason and exit 0 within seconds |
 
@@ -175,7 +173,8 @@ seeds, zero-baseline deltas, and checks needing attention. Confirm also includes
 instance-bootstrap and held-out estimates when available.
 
 The JSON report (`qtb-quality-report/1`) exposes `overall`, `families`, `trade_score`,
-`constraint_counts`, all evaluator `summaries` (including per-seed log differences),
+`constraint_counts`, `quality_guard_tolerances`, all evaluator `summaries` (including
+per-seed log differences),
 `quality_comparison`, constraints and provenance. Missing or invalid estimates are marked
 unavailable; they are never treated as passing scores. Scores use the frozen geometric
 weighting, with lower ratios better; arithmetic means are descriptive. Iterations family
@@ -205,7 +204,7 @@ Iterations quality is roughly 930 compiles per revision. Confirm quality is roug
 compiles per revision in 458 scheduled batches. The version-7 target for the whole confirm
 stage, both revisions compiled and the audit included, is about 45 minutes on 15 slots; the
 model in design/updated_confirm_plan.md section 4.3 estimates about 46 minutes (about 300
-slot-minutes per revision). It does not price C1-lite or the audit's capture and replay, and
+slot-minutes per revision). It does not price the audit's capture and replay, and
 135 of the 209 cases are estimated from a laptop probe, so it is a target to measure on the
 cluster, not a guaranteed wall time.
 

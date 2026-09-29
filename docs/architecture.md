@@ -69,7 +69,7 @@ Three rules shape the whole design:
 | Coordinator | `src/qtb/coordinator/` | No | Stages and their locks, the gate, the baseline store, job scheduling, timeouts, determinism audit, cost sessions, upstream tests, `decide` and `clean` |
 | Worker | `worker/qtb_worker/` | Yes, the revision under test | Rebuild inputs from canonical data, compile, export outputs, time compiles, measure memory, run live API checks |
 | Metrics | `src/qtb/metrics/` | No | Streaming `D2`/`N2`, target legality (C0), layout validation, exact routing replay (C6) |
-| Verifier | `verifier/qtb_verifier/` | Yes, pinned Qiskit 2.5.2 | Semantic oracles: C1, C2/C1-lite, C3, C5, C7 ([verifier.md](verifier.md)) |
+| Verifier | `verifier/qtb_verifier/` | Yes, pinned Qiskit 2.5.2 | Semantic oracles: C1, C2, C3, C5, C7 ([verifier.md](verifier.md)) |
 | Evaluator | `src/qtb/evaluator/` | No | Paired log-ratio estimators, guards, change scope and stage coverage, cost guards, verdict ([metrics.md](metrics.md)) |
 | Reporter | `src/qtb/reporter/` | No | Writes `decision.json` and `report.md` ([output-format.md](output-format.md)) |
 | Tools | `tools/` | Some | Fixture curation (`tools/curate/`), probes, timeout freezing, schema generation. Not used at comparison time |
@@ -171,7 +171,7 @@ src/qtb/
   evaluator/          statistics, quality guards, cost guards, scope, verdict
   reporter/           decision.json and report.md
 worker/qtb_worker/    adapter.py (Qiskit version adapter), modes.py
-verifier/qtb_verifier/ small_exact.py (C1, C7), layout_semantics.py (C2, C1-lite),
+verifier/qtb_verifier/ small_exact.py (C1, C7), layout_semantics.py (C2),
                       dynamic.py (C3), schedule.py (C5)
 profiles/             iterations-profile/, confirm-profile/
 fixtures/             circuits/, references/, targets/, correctness-suite.json, PROVENANCE.md
