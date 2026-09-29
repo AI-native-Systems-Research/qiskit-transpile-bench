@@ -133,6 +133,7 @@ def behavior_checks(comparison, revisions=("baseline", "evolved")):
             for check in checks:
                 if isinstance(check, int):
                     check = verdicts[check]
+                check.setdefault("oracle", case["oracle"])
                 check.update(case_id=case["case_id"], revision=revision, seed=result["seed"])
                 append_record(comparison.directory / "correctness.jsonl", check)
                 statuses.append(check["status"])
@@ -150,6 +151,13 @@ def behavior_checks(comparison, revisions=("baseline", "evolved")):
         for case, rows in zip(api_cases, api, strict=True):
             ok = _api_ok(rows[0])
             statuses.append("verified" if ok else "mismatch")
+            append_record(
+                comparison.directory / "correctness.jsonl",
+                {"case_id": case["case_id"], "revision": revision, "seed": 0,
+                 "oracle": "API", "status": "verified" if ok else "mismatch",
+                 "detail": "Input immutability, pass-manager reuse, batch order, expected errors",
+                 "checks": rows[0]},
+            )
             if not ok:
                 comparison.evidence(
                     record(

@@ -49,6 +49,21 @@ proven failures and unresolved required tests retain their existing verdicts.
 
 ## Outputs and baseline reuse
 
+Every completed or gate-skipped stage automatically writes `stages/correctness/report.md`
+and `stages/correctness/report.json` (`qtb-correctness-report/1`), without an extra flag or
+`decide`. The report includes every constraint result, baseline preflight, counts by revision,
+oracle and mode, and an expandable table of every recorded C1–C5, structural, API and C7
+check: case, seed, outcome, diagnostics and baseline store reuse. Counts describe check
+records, not unique compiles: a compiled output can have several checks. Successful API
+checks are recorded too. A failed baseline preflight explicitly marks the evolved half as
+not checked; a skipped stage shows its reason and never claims a pass.
+
+The JSON includes provenance, constraints, outcome counts and full check records. Missing
+details in older sessions are marked unavailable. These descriptive reports do not change
+the correctness rules. They are authoritative once the stage is `complete` or `skipped`,
+survive `clean`, and their details also appear in the final session `report.md` and
+`decision.json:test_reports` when `decide` runs. A retry replaces the stage report on completion.
+
 The stage owns `correctness.jsonl`, `clifford.jsonl` and `stages/correctness/`. The baseline
 half is stored only when every baseline check is decisive (`verified` or `mismatch`) and no
 worker failed or timed out. Stored failures can therefore identify a broken baseline in

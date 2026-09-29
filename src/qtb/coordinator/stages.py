@@ -57,6 +57,7 @@ from qtb.envbuild import SERIAL, host_mismatch
 from qtb.errors import Contaminated, HarnessError, Incomplete, Precondition, Usage
 from qtb.evaluator import evaluate_quality, record
 from qtb.reporter import write_quality_report
+from qtb.reporter.stage_details import write_stage_report
 
 STAGE_ORDER = ("compile", "quality", "correctness", "unit-tests", "cost")
 PREREQUISITES = {
@@ -432,6 +433,9 @@ def _skip(comparison, previous, reason):
         "inputs": _inputs(comparison),
         "reason": reason,
     }
+    write_stage_report(
+        comparison.directory, comparison.stage, comparison.run, state, [], comparison.policy
+    )
     _write_state(comparison.directory, comparison.stage, state)
     _record_invocation(comparison.directory, comparison.stage, state, EXIT_OK)
     return EXIT_OK
@@ -518,6 +522,12 @@ def _execute(comparison, previous, progress):
         if prepared is not None:
             raise prepared
         fields = BODIES[stage](comparison)
+        if stage in GATED:
+            write_stage_report(
+                root, stage, comparison.run, dict(state, **fields, status="complete"),
+                comparison.records, comparison.policy,
+            )
+            progress(f"{stage} report: {comparison.stage_dir / 'report.md'} (and report.json).")
         status, code = "complete", EXIT_OK
     except Contaminated as exc:  # interference, not a crash: nothing is committed
         fields, status, code = _contaminated(exc, progress, stage)

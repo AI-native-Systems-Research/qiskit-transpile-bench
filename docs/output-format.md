@@ -27,6 +27,7 @@ Cleaned /…/sessions/idea1: freed 1.42 GiB in 38 items.
 | --- | --- |
 | The verdict and why, in words | `report.md` |
 | Quality scores and diagnostics immediately after quality | `stages/quality/report.md` or `stages/quality/report.json` |
+| Detailed correctness, cost and upstream test results immediately after each stage | `stages/<stage>/report.md` or `stages/<stage>/report.json`, for `correctness`, `cost`, `unit-tests` |
 | The verdict for scripts or CI | the exit code of `decide`, or `decision.json` → `status` |
 | Which stages ran, where and for how long | the "Stages" table at the top of `report.md`, or `stages/<stage>/state.json` |
 | Why a stage failed or was skipped | `stages/<stage>/state.json` → `reason`, then `stages/<stage>/progress.log` |
@@ -74,6 +75,7 @@ can contain failed checks and still exit 0; `decide` reports their effect on the
 | `evidence.json` | `decide` | The committed evidence of every stage, merged |
 | `decision.json` | `decide` | Machine-readable verdict |
 | `report.md` | `decide` | Human-readable verdict |
+| `stages/{correctness,cost,unit-tests}/report.{md,json}` | Respective stage | Detailed test snapshot (`qtb-correctness-report/1`, `qtb-cost-report/1`, `qtb-unit-tests-report/1`); complete or skipped stage, retained by `clean` |
 | `progress.log` | `decide` | The stage logs concatenated in stage order, then one table of step durations for all stages |
 | `clean.json` | `clean` | What `clean` deleted ([below](#cleanjson)) |
 
@@ -177,6 +179,7 @@ Schema: `src/qtb/config/schemas/decision.json` (format `qtb-decision/1`).
 | `stages` | One entry per stage: `stage`, `status` (or `not started`), `required`, `host`, `seconds`, `attempts`, `note` and `reused` |
 | `stage_state_hashes` | The hash of each `state.json` this decision read (`null` for a stage not started). `clean` checks them |
 | `notes` | The notes printed under the stage table in `report.md` |
+| `test_reports` | Detailed `correctness`, `unit-tests` and `cost` snapshots: status, provenance, constraints and individual checks, suites or measurement regimes; also rendered in `report.md` |
 | `identities` | Build ID of each revision (`baseline`, `evolved`) |
 | `constraints` | Every constraint record: `id`, `kind`, `subject`, `result`, plus details such as `value`, `SE`, `threshold` and `detail` |
 | `required_ids` | The record IDs that must all pass for `PASS` |
@@ -246,9 +249,25 @@ The same information as `decision.json`, written for people. Sections, in order:
 10. **Per-case changes:** each case and metric with its seed-aggregated ratio and worst seed.
 11. **Compilation cost:** each cost panel's result and the candidate's log time ratio
     against the baseline.
-12. **Coverage and provenance:** the stage-coverage rule (report-only in confirm v13),
+12. **Correctness tests:** all constraint results, baseline preflight, counts by revision,
+    oracle and mode, and an expandable table of each check with case, seed, outcome,
+    diagnostics and store reuse. Counts are check records, not unique circuits.
+13. **Unit tests:** Python/Rust suite completion and outcomes for both revisions, known-bad
+    baseline failures, regressions (including missing tests), changed tests, budgets and
+    per-test outcomes and Python failure details. The evolved-owned suite is report-only.
+14. **Cost tests:** each panel's result and each screen/full/rerun result, rounds, units,
+    thresholds, mode/host, panel ratios, per-case estimates, deltas and cap breaches, with
+    raw bundle paths. Uses replayed evidence; previous breaches remain visible after a pass
+    on rerun. Report-only panels are labeled.
+15. **Coverage and provenance:** the stage-coverage rule (report-only in confirm v13),
     uncovered scored cases, the change scope as JSON, declared workload gaps, and the cases
     whose pipeline fingerprints changed. Archived policies retain their required coverage rule.
+
+The three detailed test sections are also stored in `decision.json:test_reports`, keyed
+by stage. They use only committed results; skipped, not-started and unfinished stages show
+their status, never a pass. Older sessions with no individual details say unavailable.
+These sections describe the evidence and do not introduce new verdict rules. Stage report
+snapshots are not rewritten by `decide`, and all reports survive `clean`.
 
 An illustrative excerpt (numbers and keys invented to show the layout):
 

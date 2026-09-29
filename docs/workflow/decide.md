@@ -30,7 +30,11 @@ the outcome in the orchestration report.
 
 `decide` prints the verdict and the session directory. It writes `decision.json` (for
 machines) and `report.md` (for people) into the session directory. The report starts with a
-table of every stage: its state, host, duration and, for a skipped stage, the reason. See
+table of every stage: its state, host, duration and, for a skipped stage, the reason. It also
+includes detailed correctness checks, Python/Rust test outcomes and cost measurements for
+every recorded regime, including failures, unresolved results, skips and baseline reuse.
+These sections are available as `decision.json:test_reports`; stage report snapshots remain
+unchanged. See
 [output format](../output-format.md).
 
 | Verdict | Exit | Meaning | What to do next |

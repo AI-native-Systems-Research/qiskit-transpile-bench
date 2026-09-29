@@ -42,12 +42,19 @@ def test_upstream_time_budgets_are_frozen_and_used(tmp_path, monkeypatch):
 
     def logged(command, cwd, env, log, timeout):
         seen["rust"] = timeout
-        log.write_text("test a::b ... ok\ntest a::c ... FAILED\ntest result: FAILED.\n")
+        log.write_text(
+            "test a::b ... ok\ntest a::c ... FAILED\ntest a::d ... ignored\ntest result: FAILED.\n"
+        )
 
     monkeypatch.setattr("qtb.coordinator.upstream.run_logged", logged)
     build = {"toolchain_channel": "stable", "environment": str(tmp_path / "env")}
     rust = rust_suite(build, tmp_path / "rust", 10800)
     assert rust["completed"] and rust["passed"] == ["a::b"] and rust["failed"] == ["a::c"]
+    assert rust["tests"] == [
+        {"nodeid": "a::b", "outcome": "passed"},
+        {"nodeid": "a::c", "outcome": "failed"},
+        {"nodeid": "a::d", "outcome": "skipped"},
+    ]
     assert seen == {"python": 14400, "rust": 10800}
 
 

@@ -8,6 +8,7 @@ from statistics import fmean
 from qtb.canonical import atomic_bytes, write_json
 from qtb.config import validate
 from qtb.evaluator import verdict
+from qtb.reporter.stage_details import render_stage_details
 
 
 def _quality_comparison(manifest, observations):
@@ -156,6 +157,7 @@ def make_decision(
         "stages": session.get("stages", []),
         "stage_state_hashes": session.get("stage_state_hashes", {}),
         "notes": session.get("notes", []),
+        "test_reports": session.get("test_reports", {}),
         "identities": {k: v["id"] for k, v in run.get("builds", {}).items()},
         "constraints": records,
         "required_ids": sorted(required_ids),
@@ -439,6 +441,8 @@ def render_report(decision):
                 f"| {row['id']} | {row['result']} | {regime} | "
                 f"{row['candidate']['ln_panel']:.6f} |"
             )
+    for report in decision.get("test_reports", {}).values():
+        lines += [""] + render_stage_details(report)
     coverage_required = any(id_.endswith("/stage-coverage") for id_ in decision["required_ids"])
     lines += [
         "",

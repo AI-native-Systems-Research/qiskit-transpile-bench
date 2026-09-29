@@ -42,6 +42,8 @@ from qtb.coordinator.store import Store
 from qtb.errors import HarnessError, Precondition
 from qtb.evaluator import EXIT_CODES, evaluate_quality
 from qtb.reporter import make_decision, write_report
+from qtb.reporter.stage_details import STAGES as REPORT_STAGES
+from qtb.reporter.stage_details import make_stage_report
 
 
 def _archived_profile(root, run):
@@ -340,6 +342,13 @@ def _decide(root, run, states, hashes, by_stage):
         "stages": _stage_rows(states, required),
         "stage_state_hashes": hashes,
         "notes": notes,
+        "test_reports": {
+            stage: make_stage_report(
+                root, stage, run, states[stage],
+                [r for r in evidence if r["kind"] == "cost"]
+                if stage == "cost" else by_stage[stage], policy,
+            ) for stage in REPORT_STAGES
+        },
     }
     decision = make_decision(
         run, records, required_ids, summaries, rows, manifest, policy, session=session

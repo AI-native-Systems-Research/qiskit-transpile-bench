@@ -127,6 +127,23 @@ session](../validation.md#known-outcome-controls) to check runner drift.
 
 ## Outputs and retries
 
+Every completed or skipped stage automatically writes `stages/cost/report.md` and
+`stages/cost/report.json` (`qtb-cost-report/1`), without an extra flag or `decide`. The report
+lists every recorded panel, its binding or report-only result, and each measured screen,
+full measurement and rerun. Each regime includes its round count, estimator and units,
+measurement mode, host and session, applicable thresholds, panel ratio, and per-case
+baseline/evolved estimates, absolute deltas, ratios and cap breaches. Companion seed IDs
+and paths to the raw bundles (including monitoring evidence) are included. Intermediate
+breaches remain visible even when a rerun passes.
+
+The JSON includes provenance, constraints, frozen thresholds and protocol, and detailed
+regime results. Skips show their reason; unresolved comparisons and missing archived
+details are not shown as passes. Reports are authoritative once the stage is `complete`
+or `skipped` and survive `clean`. A noisy or unfinished attempt has no committed test
+report. A retry replaces the report on completion. `decide` replays the cost evidence and
+includes the detailed results in the final session `report.md` and
+`decision.json:test_reports`; it does not overwrite the stage snapshot.
+
 Raw bundles live under `cost/`; the stage writes cost records under `stages/cost/`. Bundles
 record the cost host, independent arm IDs, the protocol, thresholds, the interleaving seed,
 the measurement mode, every worker job and, in cores mode, the monitoring evidence: the

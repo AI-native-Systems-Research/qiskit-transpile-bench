@@ -58,6 +58,23 @@ works under unittest but not under pytest, so they appear as known-bad baseline 
 
 ## Outputs and retries
 
+Every completed or gate-skipped stage automatically writes `stages/unit-tests/report.md`
+and `stages/unit-tests/report.json` (`qtb-unit-tests-report/1`), without an extra flag or
+`decide`. Reports show each Python/Rust suite and revision, completion, outcome counts,
+budgets, baseline reuse, changed test files, known-bad failures and candidate regressions.
+Expandable tables list individual test IDs and outcomes, including skipped tests and
+baseline-passing tests missing from the candidate. Python failure details include the
+test phase; original result and log paths are retained. Counts collapse pytest's setup,
+call and teardown records to one outcome per test, with failures taking precedence.
+The evolved tree's own Python tests are explicitly report-only.
+
+The JSON contains the same details and provenance, including individual Python phase
+records and Rust outcomes. Missing archived details are marked unavailable. Skipped or
+incomplete suites are never reported as passes. The reports are authoritative once the
+stage is `complete` or `skipped`, survive `clean`, and are replaced on a completed retry.
+`decide` includes these details in the final session `report.md` and
+`decision.json:test_reports`. A stage that never started is explicitly shown as not started.
+
 The stage owns `upstream-baseline/`, `upstream-evolved/`, `upstream-evolved-own/`,
 `upstream-evolved-own.json`, `changed-tests.json` and `stages/unit-tests/`. Python test
 records are gzipped as `tests.jsonl.gz`, with detailed text kept only for failed tests. The

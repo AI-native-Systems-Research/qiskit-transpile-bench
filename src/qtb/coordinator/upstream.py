@@ -228,6 +228,11 @@ def rust_suite(build, directory, timeout_s, cargo_home=None):
         "log": str(log),
         "failed": sorted(n for n, o in outcomes.items() if o == "FAILED"),
         "passed": sorted(n for n, o in outcomes.items() if o == "ok"),
+        "tests": [
+            {"nodeid": name, "outcome": {"ok": "passed", "FAILED": "failed",
+                                        "ignored": "skipped"}[outcome]}
+            for name, outcome in sorted(outcomes.items())
+        ],
     }
 
 

@@ -223,6 +223,13 @@ def cost_guard(bundle, policy, estimator, weights, run_id=None, requirement=None
         "count": threshold["count"],
         "threshold": threshold,
         "candidate": candidate,
+        "estimates": estimates,
+        "estimator": estimator,
+        "units": "bytes" if estimator == "memory" else "ns",
+        "measurement_mode": bundle.get("measurement_mode", "machine"),
+        "machine": bundle.get("machine", {}),
+        "session_id": bundle["session_id"],
+        "companion_seeds": seeds,
         "needs_full": regime == "screen" and result != "passed",
         "needs_rerun": candidate["breached"] and regime == "normal",
     }

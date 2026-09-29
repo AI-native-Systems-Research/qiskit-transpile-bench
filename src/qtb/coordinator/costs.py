@@ -404,7 +404,7 @@ def measure_panel(
         if regime == "normal" and result.get("needs_rerun"):
             continue
         break
-    return results[-1]
+    return dict(results[-1], regimes=results)
 
 
 def measure_costs(comparison):
@@ -477,6 +477,7 @@ def replay_costs(directory, run, manifest, policy, evidence):
             )
         weights = panel_weights(cases, estimator)
         counts = regime_counts(estimator, policy["measurement_protocol"])
+        results = []
         try:
 
             def check(
@@ -486,6 +487,7 @@ def replay_costs(directory, run, manifest, policy, evidence):
                 bundles=bundles,
                 weights=weights,
                 estimator=estimator,
+                results=results,
             ):
                 if not bundles[regime].exists():
                     raise Incomplete(f"Missing {regime} cost bundle")
@@ -501,9 +503,11 @@ def replay_costs(directory, run, manifest, policy, evidence):
                     for a in MEASURED_ARMS
                 ):
                     raise Incomplete("Cost bundle build identities changed")
-                return bundle, cost_guard(
+                result = cost_guard(
                     bundle, policy, estimator, weights, run["run_id"], run.get("cost_evidence")
                 )
+                results.append(result)
+                return bundle, result
 
             previous = None
             if "screen" in counts:
@@ -517,6 +521,7 @@ def replay_costs(directory, run, manifest, policy, evidence):
                     raise Incomplete("Cost breach requires a fresh doubled-count rerun")
                 _, result = check("rerun", previous)
             details = {k: v for k, v in result.items() if k != "result"}
+            details["regimes"] = results
             if name not in guarded:
                 details["observed_result"] = result["result"]
             result = record(
@@ -528,6 +533,7 @@ def replay_costs(directory, run, manifest, policy, evidence):
                 "cost",
                 "unresolved" if name in guarded else "not_evaluated",
                 detail=str(exc),
+                regimes=results,
             )
         evidence = [r for r in evidence if r["id"] != id_] + [result]
     return evidence

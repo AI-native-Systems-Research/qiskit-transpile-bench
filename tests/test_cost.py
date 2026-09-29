@@ -215,6 +215,9 @@ def test_unclear_screen_measures_in_full_then_reruns_fresh(monkeypatch, tmp_path
     assert (result["result"], result["regime"], result["count"]) == ("failed", "rerun", 8)
     assert len(calls) == (2 + 4 + 8) * 2
     regimes = ("screen", "normal", "rerun")
+    assert tuple(r["regime"] for r in result["regimes"]) == regimes
+    assert all(r["estimates"]["baseline"]["c"] == 10**9 for r in result["regimes"])
+    assert all(r["estimates"]["evolved"]["c"] == 1_150_000_000 for r in result["regimes"])
     bundles = {r: read_json(tmp_path / f"cost/timing/{r}.json") for r in regimes}
     assert len({b["session_id"] for b in bundles.values()}) == 3
     assert [len(b["arms"]["evolved"]["samples"]["c"]) for b in bundles.values()] == [2, 4, 8]
@@ -225,10 +228,11 @@ def test_replay_accepts_a_clear_screen_and_demands_the_rest_otherwise(monkeypatc
 
     for ratio, expected in ((1.0, "passed"), (1.15, "failed")):
         directory = tmp_path / f"ratio-{ratio}"
-        _, _, case, builds = measured_panel(monkeypatch, directory, ratio)
+        measured, _, case, builds = measured_panel(monkeypatch, directory, ratio)
         run = dict(profile="iterations-profile", run_id="run", scope={}, builds=builds)
         replayed = replay_costs(directory, run, {"cases": [case]}, POLICY, [])
         assert replayed[0]["result"] == expected
+        assert replayed[0]["regimes"] == measured["regimes"]
         assert replayed[0]["regime"] == ("screen" if ratio == 1.0 else "rerun")
         if ratio == 1.15:
             (directory / "cost/timing/rerun.json").unlink()
