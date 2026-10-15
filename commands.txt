@@ -18,39 +18,73 @@ uv run python lsf/submit.py --resume --upgrade-cost --store ./qtb-store \
     --reason "old monitor aborted cost on unmeasured windows; fixed thresholds in 78fd63f"
 
 
-
-
-
 uv run python lsf/submit.py   --store ./qtb-store \
-    --results-root ./qtb-sessions/qiskit-confirm_profile-0.83  \
+    --results-root ./qtb-sessions/qiskit-confirm_profile-0.83_v5  \
     --baseline /u/ophirazu/projects/qiskit  \
-    --evolved /u/ophirazu/projects/qiskit-evolve-0.83 \
+    --evolved /u/ophirazu/projects/qiskit-evolve-0.83-for-PR \
     --profile confirm-profile  \
     --cost-ncpus 56  \
-    --cost-max-r1m 10
+    --cost-max-r1m 10 \
+    --unit-tests
 
 uv run python lsf/submit.py   --store ./qtb-store \
-    --results-root ./qtb-sessions/qiskit-confirm_profile-AA  \
-    --baseline /u/ophirazu/projects/qiskit  \
-    --evolved /u/ophirazu/projects/qiskit \
-    --profile confirm-profile  \
-    --cost-ncpus 56  \
-    --cost-max-r1m 10
-
-uv run python lsf/submit.py   --store ./qtb-store \
-    --results-root ./qtb-sessions/qiskit-confirm_profile-0.829  \
+    --results-root ./qtb-sessions/qiskit-confirm_profile-0.829_v4  \
     --baseline /u/ophirazu/projects/qiskit  \
     --evolved /u/ophirazu/projects/qiskit-evolve-0.829 \
     --profile confirm-profile  \
     --cost-ncpus 56  \
-    --cost-max-r1m 10
+    --cost-max-r1m 10 \
+    --unit-tests
 
 
 uv run python lsf/submit.py   --store ./qtb-store \
-    --results-root ./qtb-sessions/qiskit-confirm_profile-0.89  \
+    --results-root ./qtb-sessions/qiskit-confirm_profile-AA_v4  \
+    --baseline /u/ophirazu/projects/qiskit  \
+    --evolved /u/ophirazu/projects/qiskit \
+    --profile confirm-profile  \
+    --cost-ncpus 56  \
+    --cost-max-r1m 10 \
+    --unit-tests
+
+
+uv run python lsf/submit.py   --store ./qtb-store \
+    --results-root ./qtb-sessions/qiskit-confirm_profile-0.89_v4  \
     --baseline /u/ophirazu/projects/qiskit  \
     --evolved /u/ophirazu/projects/qiskit-evolve-0.89 \
     --profile confirm-profile  \
     --cost-ncpus 56  \
-    --cost-max-r1m 10
+    --cost-max-r1m 10 \
+    --unit-tests
 
+
+uv run python lsf/submit.py   --store ./qtb-store \
+    --results-root ./qtb-sessions/qiskit-confirm_swap_v1  \
+    --baseline /u/ophirazu/projects/qiskit_swap_before/qiskit  \
+    --evolved /u/ophirazu/projects/qiskit_swap_after/qiskit \
+    --profile confirm-profile  \
+    --cost-ncpus 56  \
+    --cost-max-r1m 10 \
+    --unit-tests
+
+
+uv run python lsf/submit.py   --store ./qtb-store \
+    --results-root ./qtb-sessions/qiskit_gate_fusion_v3_after_fix  \
+    --baseline /u/ophirazu/projects/qiskit_gate_fusion_before \
+    --evolved /u/ophirazu/projects/qiskit_gate_fusion_after \
+    --profile confirm-profile  \
+    --cost-ncpus 56  \
+    --cost-max-r1m 10 \
+    --unit-tests
+
+
+uv run python lsf/submit.py   --store ./qtb-store \
+    --results-root ./qtb-sessions/qiskit_time_aware  \
+    --baseline /u/ophirazu/projects/qiskit_time_aware_before \
+    --evolved /u/ophirazu/projects/qiskit_time_aware_after \
+    --profile confirm-profile  \
+    --cost-ncpus 56  \
+    --cost-max-r1m 10 \
+    --unit-tests
+
+
+    
