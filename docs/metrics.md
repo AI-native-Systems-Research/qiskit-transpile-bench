@@ -97,7 +97,7 @@ seeds, or a missing seed of any case, makes the record `unresolved`; nothing is 
 reweighted, and mixed counts alone never make a record unresolved. The report shows a mixed
 panel's seed range ("50–100 per case"), and each panel summary in `decision.json` carries
 `seed_counts` and `strata`. The report-only instance bootstrap resamples seeds within each
-stratum. The shipped profiles still use 100 seeds on every scored case.
+stratum. The shipped profile still uses 100 seeds on every scored case.
 
 **Worked example** (three cases, weights 1/3, four seeds; `tests/test_statistics.py`
 reproduces these digits):
@@ -114,9 +114,7 @@ improvement.
 
 ### Weights
 
-- **Iterations profile:** the three scored cases have weight 1/3 each. The basis panels use
-  equal weights.
-- **Confirm profile:** a tree. Each family gets 1/8, split equally by level, then size band,
+- **Scored panel:** a tree. Each family gets 1/8, split equally by level, then size band,
   topology, basis, input group and variant (`hierarchical_weights()`). The weights are frozen
   in the manifest; `load_profile()` refuses scored weights that do not sum to 1.
 - **Sub-panels** (a family, a level): restrict to member cases and renormalize.
@@ -125,14 +123,13 @@ improvement.
 
 | Rule | Inequality | Used for |
 | --- | --- | --- |
-| Improvement, iterations | `ln(D2 score) + 2·SE < 0` | `IA2/improvement` |
-| Improvement, confirm | `ln(D2 score) + 2·SE < ln(0.99)` | `CA2/improvement` (at least 1% practical gain) |
-| Breadth, confirm | ≥ 4 of 8 families with `ln(D2) + 2·SE < 0`, and every leave-one-family-out score < 1 | `CA3/breadth` |
+| Improvement | `ln(D2 score) + 2·SE < ln(0.99)` | `CA2/improvement` (at least 1% practical gain) |
+| Breadth | ≥ 4 of 8 families with `ln(D2) + 2·SE < 0`, and every leave-one-family-out score < 1 | `CA3/breadth` |
 | Regression guard, overall and basis panels | `ln(score) ≤ 3·SE` | `N2` of the scored panel; `D2` and `N2` of basis panels |
-| Regression guard, confirm family and level | `ln(score) ≤ ln(1.05) + 3·SE` | `D2` and `N2` of each family and optimization level |
+| Regression guard, family and level | `ln(score) ≤ ln(1.05) + 3·SE` | `D2` and `N2` of each family and optimization level |
 | Per-case quality cap | `case_ratio ≤ 2.0` (seed-aggregated, not per seed); with `quality_cap_rule: noise_aware` a case breaches only when also `ln(case_ratio) > 3·SE_case` | Every scored and guard case, `D2` and `N2` |
-| Per-case SE guard | `ln(case_ratio) ≤ ln(1.15) + 3·SE_case` in confirm; zero margin in iterations | Guard cases outside a basis panel |
-| Deterministic | Evolved `≤ 1.25 × baseline` on every seed in confirm; evolved `≤ baseline` in iterations | Ordinary deterministic cases, each of `D2` and `N2` independently |
+| Per-case SE guard | `ln(case_ratio) ≤ ln(1.15) + 3·SE_case` | Guard cases outside a basis panel |
+| Deterministic | Evolved `≤ 1.25 × baseline` on every seed | Ordinary deterministic cases, each of `D2` and `N2` independently |
 | Exact zero | Evolved `= 0` | Zero-baseline cases |
 | Canary | Both revisions `=` the frozen constant on every seed | Canaries |
 
@@ -150,11 +147,11 @@ or compensation between metrics; a zero baseline must remain zero.
 
 Overall N2, basis-panel guards, improvement and breadth, canaries, zero-baseline cases and
 correctness checks retain their previous rules. Missing tolerance fields default to zero,
-so archived policies and the iterations profile retain strict regression guards. Record
+so archived policies retain strict regression guards. Record
 IDs under `CA4/exact/` are retained for compatibility even though ordinary deterministic
 cases now have an allowance. Quality reports expose the active tolerances.
 
-**Cap rule.** `quality_cap_rule` is `plain` in both shipped profiles (and for any policy
+**Cap rule.** `quality_cap_rule` is `plain` in the shipped profile (and for any policy
 without the key): a case breaches when its ratio exceeds `quality_cap`. `noise_aware` also
 requires `ln(case_ratio) > guard_multiplier · SE_case`, with `SE_case` from the case's paired
 per-seed log differences over the same seed block. It reduces false cap breaches when a
@@ -182,7 +179,7 @@ rate is not measured (section 5).
 
 Earlier versions compiled the baseline on two extra seed blocks to estimate the family-wise
 false-rejection rate of the guards, and timed the baseline against itself to measure the
-machine's cost noise. Version 4 of the profiles removed that phase (see
+machine's cost noise. Version 4 of the profile removed that phase (see
 [design/remove-calibration-plan.md](../design/remove-calibration-plan.md)):
 
 - The quality guards use their fixed multipliers only. Their combined false-rejection rate on
@@ -199,7 +196,7 @@ Cost has its own estimators. The quality seed estimator is never applied to cost
 ```text
 t(c, arm)     = median over rounds of ( median over timed calls in that round )
 companion     = mean over the policy's companion_seeds of the above (arithmetic mean: users
-                pay the average; confirm 0–9, iterations 0–19)
+                pay the average; seeds 0–9)
 rss(c, arm)   = median over fresh processes of peak RSS
 ln_panel      = Σ_c u_c · ln( t(c, evolved) / t(c, baseline) )   u_c = 1/|panel|
                 (memory: equal weight per family)
@@ -207,9 +204,9 @@ ln_panel      = Σ_c u_c · ln( t(c, evolved) / t(c, baseline) )   u_c = 1/|pane
 
 - **Protocol** (`policy.json` → `measurement_protocol`): timing panels are measured in up to
   three regimes, each a fresh session: a `screen_rounds` screen (4), a `timing_rounds` full
-  measurement (6 in the iterations profile, 10 in confirm) and a rerun at `rerun_multiplier`
+  measurement (10) and a rerun at `rerun_multiplier`
   times the full count. The companion has 3 rounds per seed and memory `memory_processes`
-  processes (3 in confirm, 5 in iterations), each with a doubled rerun and no screen. A timing round is one fresh process per arm that loads,
+  processes (3), each with a doubled rerun and no screen. A timing round is one fresh process per arm that loads,
   warms up (`warmups` = 1 call) and times every case of the panel in manifest order, timing
   each until at least `minimum_calls` (2) calls and `minimum_ns` (1 s) have accumulated; the
   companion and memory use one fresh process per arm and case. The two arms (baseline,
@@ -257,7 +254,7 @@ stage a candidate changed (`evaluator/scope.py`):
    any path the mapping does not recognize. There is no way to declare a scope by hand.
 3. For every scored case, some verified check must cover all changed stages, for an applicable
    input domain, without having substituted a changed component. Otherwise
-   `IA1/stage-coverage` (`CA1/...`) is `unresolved`.
+   `CA1/stage-coverage` is `unresolved`.
 
 The rule combines the quality checks (C0, C6) with the C7 Clifford checks of the
 `correctness` stage, so `decide` computes `*1/stage-coverage` once both stages are complete.
@@ -269,7 +266,7 @@ and its uncovered cases remain in `decision.json` and the report, but the record
 requires the correctness test suite and all other required checks. This establishes passing
 test-suite evidence, not complete semantic coverage of the scored workload.
 
-**Iterations and archived confirm policies:** stage coverage remains mandatory when its ID
+**Archived policies:** stage coverage remains mandatory when its ID
 is in the frozen policy's `required_ids`. Routing replay (C6) covers layout and routing on
 every scored output, so a layout/routing-only change can pass this requirement. A change to
 optimization can remain `INCONCLUSIVE` where no applicable check covers it. Confirm version

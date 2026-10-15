@@ -6,7 +6,7 @@ simulation and memory-budget tests now exercise the C2 correctness oracle.
 [Documentation index](README.md)
 
 The implementation originated from `design/transpilation-benchmark-impl-plan.md`; the
-README describes the current CLI. Both profiles are version 10. There is no qualification
+README describes the current CLI. The confirm profile is version 13. There is no qualification
 step: a session can end `PASS` when every required record passes. Validating the harness on a
 new runner is a practice, described below, not a required record. A successful `compile` is
 not a validation. Numerical examples and synthetic acceptance-path tests are harness tests,
@@ -40,7 +40,7 @@ not measurements of an evolved Qiskit revision.
 - Trusted dense, statevector, terminal-measurement, dynamic-branching, Clifford, and schedule
   oracles; a frozen 480-configuration C1–C5 fixture suite; coherent-control phase checks;
   worker API contracts and negative configuration checks.
-- Curated iterations and confirm workloads, frozen semantic references for Trotter inputs,
+- The curated confirm workload, frozen semantic references for Trotter inputs,
   Clifford variants, explicit license/provenance records, and reproducible curation tools.
 - C1-lite eligibility based on the reference/output union, and binding baseline-owned test
   execution.

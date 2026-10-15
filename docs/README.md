@@ -4,7 +4,7 @@ Start with the **[LSF session guide](cluster.md)**: running a comparison on the 
 launcher command, and a manager job runs every stage. The [workflow overview](workflow/README.md)
 explains the stages and how to run them directly, for local work, debugging and replay. Each
 stage page owns its command, prerequisites, work, outputs, retry behavior and next step.
-Choose a profile at launch (or at `compile`); later stages use the profile saved in that
+The profile is fixed at launch (or at `compile`); later stages use the profile saved in that
 session.
 
 ## Operating guides
@@ -41,15 +41,13 @@ flowchart TD
 | 6 | [decide](workflow/decide.md) | Merge committed evidence and write the verdict/report | Inside the manager |
 | 7 | [clean](workflow/clean.md) | Remove one session's bulk, retain results | 16 slots, after decide |
 
-## Profiles
+## Profile
 
 | Guide | Use it for |
 | --- | --- |
-| [Iterations profile](iterations-profile.md) | Default inner-loop workload, IA1–IA6, weights, power and budget |
-| [Confirm profile](confirm-profile.md) | Broad confirmation workload, CA1–CA6, families, coverage and limits |
+| [Confirm profile](confirm-profile.md) | The workload, CA1–CA6, families, weights, cost panels, coverage and limits |
 
-Iterate on the iterations profile and confirm once before claiming a broad gain. The confirm
-workload is public and has no held-back part; do not tune on it.
+The workload is public and has no held-back part; do not tune on it.
 
 ## Technical references
 

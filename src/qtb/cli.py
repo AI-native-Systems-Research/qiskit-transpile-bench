@@ -47,7 +47,7 @@ def parser():
     compile_.add_argument(
         "--profile",
         choices=["iterations-profile", "confirm-profile"],
-        default="iterations-profile",
+        default="confirm-profile",
     )
     compile_.add_argument("--results-root", type=Path, default=Path("results"))
     helps = {

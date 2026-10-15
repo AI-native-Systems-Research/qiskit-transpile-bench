@@ -173,7 +173,7 @@ src/qtb/
 worker/qtb_worker/    adapter.py (Qiskit version adapter), modes.py
 verifier/qtb_verifier/ small_exact.py (C1, C7), layout_semantics.py (C2),
                       dynamic.py (C3), schedule.py (C5)
-profiles/             iterations-profile/, confirm-profile/
+profiles/             confirm-profile/
 fixtures/             circuits/, references/, targets/, correctness-suite.json, PROVENANCE.md
 envs/                 lock files for revision, test and verifier environments
 lsf/                  LSF launcher, manager, stage job entry point, cost monitor and

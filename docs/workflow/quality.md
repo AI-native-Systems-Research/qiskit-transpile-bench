@@ -177,8 +177,7 @@ The JSON report (`qtb-quality-report/1`) exposes `overall`, `families`, `trade_s
 per-seed log differences),
 `quality_comparison`, constraints and provenance. Missing or invalid estimates are marked
 unavailable; they are never treated as passing scores. Scores use the frozen geometric
-weighting, with lower ratios better; arithmetic means are descriptive. Iterations family
-and marginal summaries are report-only and introduce no additional guards.
+weighting, with lower ratios better; arithmetic means are descriptive.
 
 These files describe the quality gate, not the final benchmark verdict. `decide` still
 writes the session-level report after considering the other stages. The stage reports
@@ -200,7 +199,7 @@ same session.
 
 ## Expected work
 
-Iterations quality is roughly 930 compiles per revision. Confirm quality is roughly 15,400
+Quality is roughly 15,400
 compiles per revision in 458 scheduled batches. The version-7 target for the whole confirm
 stage, both revisions compiled and the audit included, is about 45 minutes on 15 slots; the
 model in design/updated_confirm_plan.md section 4.3 estimates about 46 minutes (about 300

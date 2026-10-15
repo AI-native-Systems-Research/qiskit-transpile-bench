@@ -19,15 +19,14 @@ uv run qiskit-transpile-bench compile \
   --results-root "$S"
 ```
 
-Use `--profile confirm-profile` for the confirm workload; the default is
-`iterations-profile`. Choose a profile before building: later stages read it from the
-session. See [profile definitions](../README.md#profiles).
+The profile is `confirm-profile` (the default). It is fixed before building: later stages
+read it from the session. See the [profile definition](../README.md#profile).
 
 | Option | Meaning |
 | --- | --- |
 | `--baseline PATH`, `--evolved PATH` | Required Qiskit source folders |
 | `--store DIR` | Required unless `QTB_STORE` is set; the flag wins. The directory must already exist |
-| `--profile NAME` | `iterations-profile` (default) or `confirm-profile` |
+| `--profile NAME` | `confirm-profile` (default) |
 | `--results-root DIR` | The session directory (default `results/`); one baseline/evolved pair |
 
 Your source folders are copied and never modified. Edits after the snapshots are made do not

@@ -794,6 +794,19 @@ class Recorder:
                 self.errors[stage] = error_text(exc)
 
 
+def budget_value(value):
+    """A JSON value for a pass budget attribute, stable across processes.
+
+    A candidate may set an attribute to an object (``SabreSwap`` accepts a ``Heuristic``),
+    which is recorded by its repr, or by its type name when the repr is the default one and
+    carries a memory address.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    text = repr(value)
+    return type(value).__name__ if " at 0x" in text else text
+
+
 def fingerprint(pm):
     budget = (
         "layout_trials",
@@ -813,7 +826,9 @@ def fingerprint(pm):
             return [
                 {
                     "pass": type(controller).__name__,
-                    "budget": {key: getattr(controller, key, "unknown") for key in budget},
+                    "budget": {
+                        key: budget_value(getattr(controller, key, "unknown")) for key in budget
+                    },
                 }
             ]
         result = []

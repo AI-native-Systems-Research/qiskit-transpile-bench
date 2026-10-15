@@ -234,3 +234,19 @@ def test_a_trace_entry_that_cannot_be_computed_is_recorded_not_raised(monkeypatc
     assert recorder.trace and all(
         entry[2] is None and entry[3].startswith("error: KeyError") for entry in recorder.trace
     )
+
+
+def test_fingerprint_records_an_object_heuristic_as_json():
+    """A candidate may pass SabreSwap a ``Heuristic``; the fingerprint must stay writable."""
+    from qiskit.transpiler import CouplingMap, StagedPassManager
+    from qiskit.transpiler.passes import SabreSwap
+    from qiskit.transpiler.passes.routing.sabre_swap import Heuristic, SetScaling
+
+    from qtb.canonical import canonical_bytes
+
+    heuristic = Heuristic(attempt_limit=10).with_basic(1.0, SetScaling.Constant)
+    routing = PassManager([SabreSwap(CouplingMap.from_line(3), heuristic=heuristic)])
+    pm = StagedPassManager(stages=["routing"], routing=routing)
+    budget = fingerprint(pm)["routing"][0]["budget"]
+    assert budget["heuristic"] == repr(heuristic)
+    canonical_bytes(fingerprint(pm))

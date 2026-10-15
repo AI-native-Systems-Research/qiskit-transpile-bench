@@ -2,7 +2,7 @@
 
 [Documentation index](../README.md) · [← correctness](correctness.md) · [cost →](cost.md)
 
-Run upstream Python and Rust tests on both revisions. Neither profile requires this stage,
+Run upstream Python and Rust tests on both revisions. The profile does not require this stage,
 but once started its results bind the verdict.
 
 ## Run this step
@@ -18,9 +18,9 @@ rules](../sessions.md) for prerequisites, retries and stage exit codes.
 ## What runs
 
 Implemented in `src/qtb/coordinator/upstream.py`. These suites are **optional**: they form
-their own stage, `unit-tests`, which either profile may run once the quality gate is open,
+their own stage, `unit-tests`, which may run once the quality gate is open,
 alongside `correctness`. The rule is: **if you run it, it counts.** Once the stage has
-started (running, failed or complete), `decide` requires `IA1/upstream` or `CA1/upstream`.
+started (running, failed or complete), `decide` requires `CA1/upstream`.
 If it never started, or the gate skipped it, the verdict is decided without it and the
 report says "Upstream tests: not run."
 

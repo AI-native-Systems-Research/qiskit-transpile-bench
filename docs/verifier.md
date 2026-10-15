@@ -83,7 +83,7 @@ feed the [stage-coverage rule](metrics.md#7-change-scope-and-stage-coverage).
 | C5 | Scheduling validity | Scheduled fixtures | Verifier (`schedule.py`) | Pure Python timeline check |
 | API | Pass-manager contracts | Level-2 fixtures | Worker `api_checks` mode, judged by the coordinator | — |
 | C6 | Routing replay | Every scored and basis-guard seed; 10 seeds of other static guards | Harness check process (`metrics/replay.py`) | Pure Python, exact |
-| C7 | Clifford variants at full scale | `clifford_seeds` of the 100-qubit circuits' Clifford variants: 3 (iterations) or 5 (confirm) | Verifier (`small_exact.py`) | Stabilizer tableaux |
+| C7 | Clifford variants at full scale | `clifford_seeds` (5) of the 100-qubit circuits' Clifford variants | Verifier (`small_exact.py`) | Stabilizer tableaux |
 
 ### C0: structure (every output)
 
@@ -201,20 +201,18 @@ on unmodified builds (design/updated_confirm_plan.md, section 3).
 Each 100-qubit scored circuit has a frozen **Clifford variant**: every rotation angle is
 replaced by a random odd multiple of π/2, which keeps the routing problem. Clifford circuits
 can be compared exactly at any width through their stabilizer tableaux. Each revision compiles
-the variant on `clifford_seeds` seeds (3 in the iterations profile, 5 in the confirm profile),
-in the prefix mode below and, where `clifford_full_mode` is set (confirm), also through the full
-pipeline. Every case, mode and seed is its own worker job, verified as soon as it lands. A
+the variant on `clifford_seeds` seeds (5), in the prefix mode below and, where
+`clifford_full_mode` is set, also through the full pipeline. Every case, mode and seed is its own worker job, verified as soon as it lands. A
 policy before version 7 has neither key and uses 3 and 10 seeds.
 C6 already replays layout and routing on every scored seed, so C7's own contribution is
 translation (and optimization, in full mode) at full width, which does not need many seeds:
 
-- **Full pipeline (confirm profile only):** covers all stages when it verifies. At levels 2–3,
+- **Full pipeline (`clifford_full_mode`):** covers all stages when it verifies. At levels 2–3,
   two-qubit resynthesis usually emits non-Clifford angles, so the result is often
-  `unverified` (8 of 9 scored variants in the 2026-09-25 A/A run). The iterations profile
-  skips it: `IA1/C7` never counted it, and it cost about 4 minutes per run.
+  `unverified` (8 of 9 scored variants in the 2026-09-25 A/A run).
 - **Prefix:** optimization stage dropped, with `unitary_synthesis_method=clifford`. Covers
   init, layout, routing and translation, with unitary synthesis recorded as **substituted**.
-  This is the variant `IA1/C7` requires.
+  This is the variant `CA1/C7` always requires.
 
 ### Removed quality-stage check
 

@@ -72,7 +72,7 @@ Do not edit a frozen profile to accept a candidate. Recuration is an explicit ma
 operation using `tools/curate/curate.py`; comparisons consume only frozen artifacts.
 The original RevLib/HWB claims do not transfer to their declared generated replacements.
 
-Confirm is at version 13; iterations remains at version 10.
+Confirm is at version 13.
 
 Version 13 of confirm removes `CA1/stage-coverage` from `required_ids`. Coverage is still
 computed and reported; uncovered scored cases no longer block a pass. Other correctness
@@ -101,8 +101,7 @@ timed out twice and the paired baseline seed finished within `baseline_fraction`
 timeout, whatever the host load. Quality runs on a loaded host by design; only the cost stage
 gates on load. The key stays optional in the schema, and a version-7 policy that names it is
 judged by its own rule. The manifests change only their version. Because `quality_timeout` is
-part of the quality measurement protocol, stored baseline quality is computed again once for
-each profile.
+part of the quality measurement protocol, stored baseline quality is computed again once.
 
 Version 7 (design/updated_confirm_plan.md) of the confirm
 profile changes seed blocks, roles, weights and the measurement protocol: `mcx_kg24_n5` at
@@ -110,19 +109,14 @@ levels 1–3 becomes a deterministic case on 10 seeds (G5 weights recomputed),
 `multiplier_h18_n20` L2 goes from 20 to 100 seeds, and confirm-timing from 20 cases to 8. Its
 policy adds `quality_batch_schedule`, `c1_lite_max_width` (22), `quality_timeout`,
 `companion_groups`, `clifford_seeds` (5) and `clifford_full_mode`, sets `companion_seeds` to
-0–9 and `memory_processes` to 3, and names `quality_cap_rule` (`plain`). The iterations policy
-moves its C7 settings into the policy (`clifford_seeds` 3, no full mode) and adds
-`quality_timeout`; its manifest changes only its version. The unimplemented
-design/iterations-quality-coverage-plan.md also claimed version 7 for its expansion; it will
-need a version after 13.
+0–9 and `memory_processes` to 3, and names `quality_cap_rule` (`plain`).
 
 Every new key is optional in the schema, and a policy without it keeps the rule of version 6:
 the fixed `quality_batch_size`, a C1-lite limit of 25, a candidate timeout that always fails,
-companion seeds 0–19, C7 on 3 (iterations) or 10 (confirm) seeds with full mode on confirm
-only, and the plain cap. `decide` therefore judges an archived version-6 session with its
+companion seeds 0–19, C7 on 10 seeds with full mode, and the plain cap. `decide` therefore judges an archived version-6 session with its
 own rules. The version-7 harness itself (snapshots from the same compile, the audit's VF2
 rule, shared failures, the pass trace) changes the harness identity, so stored baseline
-quality, correctness and unit-test entries are computed again once for each profile. The
+quality, correctness and unit-test entries are computed again once. The
 new batch schedule and C1-lite limit are part of the quality measurement protocol and
 therefore of the confirm quality key as well.
 
@@ -133,7 +127,7 @@ record `thresholds_id`, so bundles measured under version 5 thresholds are not r
 Version 5 removed qualification: the `harness/qualification`
 required ID and the policy's `qualification` object are gone, and the manifests no longer
 carry a `status`. It also removed `CA1/upstream` from the confirm policy's `required_ids`;
-`decide` now requires `*1/upstream` on either profile once the optional `unit-tests` stage has
+`decide` now requires `*1/upstream` once the optional `unit-tests` stage has
 started. `required_ids` is a constraint, so the change needed the version bump. The stored
 baseline quality key covers the case definition and the quality protocol, not the policy
 hash, so the bump does not by itself invalidate stored baseline quality.

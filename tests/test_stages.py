@@ -355,7 +355,7 @@ def test_compile_checks_its_session_directory(world, capsys):
         [
             "compile", "--baseline", str(world.sources["main"]),
             "--evolved", str(world.sources["idea"]), "--store", str(world.store),
-            "--results-root", str(root),
+            "--results-root", str(root), "--profile", "iterations-profile",
         ]
     )
     assert code == 0 and "already complete" in capsys.readouterr().out
@@ -363,7 +363,7 @@ def test_compile_checks_its_session_directory(world, capsys):
         [
             "compile", "--baseline", str(world.sources["main"]),
             "--evolved", str(world.sources["idea2"]), "--store", str(world.store),
-            "--results-root", str(root),
+            "--results-root", str(root), "--profile", "iterations-profile",
         ]
     ) == 64
 

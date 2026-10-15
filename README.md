@@ -65,11 +65,9 @@ each verdict and what to do next.
 
 ## Profiles
 
-Iterate on the [iterations profile](docs/iterations-profile.md) (the default: three
-100-qubit circuits, about 930 quality compiles per revision) and confirm once on the
-[confirm profile](docs/confirm-profile.md) (133 cases, 8 families, levels 0–3), in a
-separate session. Do not tune on the confirm profile: its workload is public and has no
-held-back part.
+Sessions run the [confirm profile](docs/confirm-profile.md) (the default: 130 scored cases,
+8 families, levels 0–3, about 15,400 quality compiles per revision). Do not tune on it: its
+workload is public and has no held-back part.
 
 ## Documentation
 

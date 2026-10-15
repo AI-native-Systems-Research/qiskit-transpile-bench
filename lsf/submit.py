@@ -100,7 +100,7 @@ def parser():
     inputs = cli.add_argument_group("session inputs")
     inputs.add_argument("--baseline", type=Path, help="baseline Qiskit source checkout (required)")
     inputs.add_argument("--evolved", type=Path, help="evolved Qiskit checkout (required)")
-    inputs.add_argument("--profile", choices=PROFILES, default="iterations-profile")
+    inputs.add_argument("--profile", choices=PROFILES, default="confirm-profile")
     paths = cli.add_argument_group(
         "shared paths", "both on a filesystem mounted at the same path on every node"
     )

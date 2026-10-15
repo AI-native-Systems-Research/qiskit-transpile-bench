@@ -39,15 +39,15 @@ unchanged. See
 
 | Verdict | Exit | Meaning | What to do next |
 | --- | ---: | --- | --- |
-| `PASS` | 0 | Depth improved and every required constraint passed | On iterations: run confirm. On confirm: you have a claim for this workload |
+| `PASS` | 0 | Depth improved and every required constraint passed | You have a claim for this workload |
 | `NO_IMPROVEMENT` | 10 | No gain beyond seed noise, and no quality check failed. Correctness is not checked when the gate is closed ([quality gate](quality.md#the-quality-gate)) | Keep iterating |
 | `CONSTRAINT_VIOLATION` | 20 | The candidate failed a quality or correctness check, or a cost guard showed a real regression | Read "Constraints needing attention" in `report.md` |
 | `INCONCLUSIVE` | 30 | Something required is missing or unresolved, a required stage has not finished, or the baseline itself failed | Read the listed reasons; run any unfinished stage and `decide` again |
 | `ERROR` | 40 | The harness, a build or an input failed | Check the build or worker logs named in the error |
 
 Changes to the optimization stage, two-qubit synthesis or shared infrastructure are not
-verified at full scale by any check, so on the iterations profile they reach at most
-`INCONCLUSIVE`. Layout and routing changes are fully covered. The change scope is always
+verified at full scale by any check; stage coverage reports them, but since version 13 it does
+not block a pass. Layout and routing changes are fully covered. The change scope is always
 inferred from the changed files. See [stage
 coverage](../metrics.md#7-change-scope-and-stage-coverage).
 
@@ -105,8 +105,7 @@ that a different harness version decided. Each run replaces `evidence.json`,
 ## Next step
 
 When the gate is closed, the report explains which expensive checks were not run. When a
-required stage is unfinished, run it and decide again. For an iterations `PASS`, start a new
-session with `--profile confirm-profile` before claiming a broad gain.
+required stage is unfinished, run it and decide again.
 
 `decide` reclaims the session's bulk itself when the session is finished; the results,
 evidence and cost bundles are kept, so deciding again works. If cleanup was skipped because

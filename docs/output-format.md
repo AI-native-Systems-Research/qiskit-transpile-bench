@@ -15,7 +15,7 @@ Each stage prints its final state, `decide` prints the verdict, and `clean` the 
 ```text
 quality: complete (/…/sessions/idea1)
 correctness: skipped: gate closed: no improvement.
-PASS (iterations-profile): /…/sessions/idea1
+PASS (confirm-profile): /…/sessions/idea1
 Cleaned /…/sessions/idea1: freed 1.42 GiB in 38 items.
 ```
 
@@ -94,7 +94,7 @@ only by `compile`; an amendment (`lsf/submit.py --resume --upgrade-cost`, or
 | Field | Content |
 | --- | --- |
 | `run_id` | `<YYYYMMDDTHHMMSS>-<8 hex>`, UTC creation time plus a random suffix |
-| `profile` | `iterations-profile` or `confirm-profile` |
+| `profile` | `confirm-profile` |
 | `hashes` | Manifest, policy, coordinator, harness wheel and implementation hashes. Every later stage refuses to run if the coordinator, implementation, manifest or policy differs |
 | `created_at` | When the session was created |
 | `session` | The session directory, absolute |
@@ -185,7 +185,7 @@ Schema: `src/qtb/config/schemas/decision.json` (format `qtb-decision/1`).
 | `required_ids` | The record IDs that must all pass for `PASS` |
 | `reasons` | Records that did not pass: `code`, `result`, `detail`. Unresolved report-only stage coverage is excluded; its cases remain in `constraints` and the coverage section |
 | `missing_records` | Required IDs with no record at all |
-| `summaries` | Per-panel estimates: `ln_score`, `score`, `SE`, `ln_score_plus_2SE`, per-seed `deltas`, and per-case estimates with `worst_seed`; confirm also has `instance_bootstrap`, `leave_iterations_out` (`D2`) and `leave_iterations_out/N2` |
+| `summaries` | Per-panel estimates: `ln_score`, `score`, `SE`, `ln_score_plus_2SE`, per-seed `deltas`, and per-case estimates with `worst_seed`; also `instance_bootstrap`, `leave_iterations_out` (`D2`) and `leave_iterations_out/N2` |
 | `quality_comparison` | `cases`: one entry per quality test with `case_id`, expected `seed_count`, and `D2`/`N2` objects containing arithmetic means (`baseline`, `evolved`) and `improvement_percent`. Missing or invalid seed pairs make that metric's values `null`; a zero baseline makes its percentage `null`. Without an archived manifest `cases` is empty and `reason` says so |
 | `scope` | Changed stages, substituted components and unmapped paths, per optimization level |
 | `cost_thresholds` | The fixed cost thresholds of the archived policy that every cost record was judged against |
@@ -202,8 +202,8 @@ finished makes the verdict `INCONCLUSIVE` (a failed stage gives `ERROR`). When `
 A constraint record looks like this:
 
 ```json
-{"id": "IA2/improvement", "kind": "improvement", "result": "passed", "subject": "evolved",
- "reference": "baseline", "value": -0.0213, "SE": 0.0054, "threshold": 0.0}
+{"id": "CA2/improvement", "kind": "improvement", "result": "passed", "subject": "evolved",
+ "reference": "baseline", "value": -0.0213, "SE": 0.0054, "threshold": -0.01005}
 ```
 
 `value` is `ln(score)`. The rule that was applied is described in [metrics.md](metrics.md#4-decision-rules).
@@ -224,7 +224,7 @@ The same information as `decision.json`, written for people. Sections, in order:
    example "baseline correctness: from the store (key 3f9a…, first computed 2026-09-25).");
    that the quality evidence was set aside because the baseline failed its preflight; and
    that a different harness version decided than the one that compiled.
-4. **Reminders:** the baseline is the reference, and confirm is a check, not a tuning loop.
+4. **Reminders:** the baseline is the reference, and the benchmark is a check, not a tuning loop.
 5. **Cost thresholds line:** the fixed panel and per-case thresholds from the policy, with a
    reminder that they are not calibrated on this machine.
 6. **Constraints needing attention:** every record that is `failed`, `unresolved` or
@@ -244,7 +244,7 @@ The same information as `decision.json`, written for people. Sections, in order:
    `N/A` (undefined). These descriptive statistics do not change the verdict, and they can
    differ slightly from the geometric case ratios of "Per-case changes".
 9. **Quality estimates:** one row per panel: ratio (`score`; below 1 is better), paired SE in
-   log units, and the upper bound `ln(score) + 2·SE`. The confirm profile adds the report-only
+   log units, and the upper bound `ln(score) + 2·SE`, plus the report-only
    instance bootstrap.
 10. **Per-case changes:** each case and metric with its seed-aggregated ratio and worst seed.
 11. **Compilation cost:** each cost panel's result and the candidate's log time ratio
@@ -259,7 +259,7 @@ The same information as `decision.json`, written for people. Sections, in order:
     thresholds, mode/host, panel ratios, per-case estimates, deltas and cap breaches, with
     raw bundle paths. Uses replayed evidence; previous breaches remain visible after a pass
     on rerun. Report-only panels are labeled.
-15. **Coverage and provenance:** the stage-coverage rule (report-only in confirm v13),
+15. **Coverage and provenance:** the stage-coverage rule (report-only since v13),
     uncovered scored cases, the change scope as JSON, declared workload gaps, and the cases
     whose pipeline fingerprints changed. Archived policies retain their required coverage rule.
 
@@ -272,7 +272,7 @@ snapshots are not rewritten by `decide`, and all reports survive `clean`.
 An illustrative excerpt (numbers and keys invented to show the layout):
 
 ```markdown
-# INCONCLUSIVE — iterations-profile
+# INCONCLUSIVE — confirm-profile
 
 ## Stages
 
@@ -290,7 +290,7 @@ An illustrative excerpt (numbers and keys invented to show the layout):
 
 ## Constraints needing attention
 
-- **unresolved** `IA1/stage-coverage`:
+- **unresolved** `CA4/exact/confirm/long_2q_sequence/rochester_53_u/L2`:
 
 ## Quality stage improvement
 
@@ -298,29 +298,30 @@ Primary D2 ratio: 0.978900 (paired SE 0.005400; upper 2 SE log effect -0.010526)
 
 Review trade score sqrt(D2 ratio × N2 ratio): 0.991420.
 
-- Primary D2 improvement: +2.11%. Improvement rule `IA2/improvement`: passed.
-- Primary N2 improvement: -0.41%. Guard `IA3/primary/N2`: passed.
+- Primary D2 improvement: +2.11%. Improvement rule `CA2/improvement`: passed.
+- Primary N2 improvement: -0.41%. Guard `CA3/primary/N2`: passed.
 
 ## Quality tests
 
 | Test | Seeds | Baseline D2 | Evolved D2 | D2 improvement | Baseline N2 | Evolved N2 | N2 improvement |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| iterations/qft_n100/heavy_hex_d9_cz/L2 | 100 | 1823.86 | 1779.41 | +2.44% | 9563.88 | 9598.20 | -0.36% |
-| iterations/square_heisenberg_n100/heavy_hex_d9_cz/L2 | 100 | 401.94 | 395.10 | +1.70% | 1823.88 | 1830.02 | -0.34% |
-| iterations/qaoa_ba_n100_3reps/heavy_hex_d9_cz/L2 | 100 | 1531.56 | 1498.02 | +2.19% | 8610.32 | 8655.95 | -0.53% |
+| confirm/qft_n100/heavy_hex_d9_cz/L2 | 100 | 1823.86 | 1779.41 | +2.44% | 9563.88 | 9598.20 | -0.36% |
+| confirm/square_heisenberg_n100/heavy_hex_d9_cz/L2 | 100 | 401.94 | 395.10 | +1.70% | 1823.88 | 1830.02 | -0.34% |
+| confirm/qaoa_ba_n100_3reps/heavy_hex_d9_cz/L2 | 100 | 1531.56 | 1498.02 | +2.19% | 8610.32 | 8655.95 | -0.53% |
 
 ## Quality estimates
 
 | Panel | Ratio | Paired SE (log) | Upper 2 SE | Seeds |
 | --- | ---: | ---: | ---: | ---: |
-| IA2/improvement | 0.978900 | 0.005400 | -0.010526 | 100 |
-| IA3/primary/N2 | 1.004100 | 0.002100 | 0.008292 | 100 |
-| IA3/cx/D2 | 0.981200 | 0.005900 | -0.007179 | 100 |
+| CA2/improvement | 0.978900 | 0.005400 | -0.010526 | 100 |
+| CA3/primary/N2 | 1.004100 | 0.002100 | 0.008292 | 100 |
+| CA3/cx/D2 | 0.981200 | 0.005900 | -0.007179 | 100 |
 ```
 
 How to read it: the `D2` score is 2.1% lower with an upper bound below zero, so the
-improvement rule passed. `N2` rose 0.4%, within its 3·SE guard. The verdict is still
-`INCONCLUSIVE` because the change touched a stage no verified check covers.
+improvement rule passed, including the 1% practical margin. `N2` rose 0.4%, within its 3·SE
+guard. The verdict is still `INCONCLUSIVE` because the evolved revision missed a canary's
+frozen constant, an unexplained change that needs human review.
 
 ## Deciding again
 

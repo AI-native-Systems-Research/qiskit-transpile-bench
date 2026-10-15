@@ -2,16 +2,16 @@
 
 [Documentation index](README.md)
 
-`confirm-profile` is the **broad check**. Run it once, when a change looks good on the
-[iterations profile](iterations-profile.md), to find out whether the gain holds beyond the
-three circuits you tuned on.
+`confirm-profile` is the benchmark's profile and the default. It asks whether a change's
+depth gain holds broadly: across eight circuit families, all four optimization levels and
+several target topologies and bases, beyond seed noise.
 
 ```bash
 Q="uv run qiskit-transpile-bench"
-S="$HOME/qtb-sessions/idea1-confirm"   # a new session directory
+S="$HOME/qtb-sessions/idea1"           # a new session directory
 
 $Q compile     --baseline /path/to/baseline --evolved /path/to/evolved \
-               --profile confirm-profile --store "$HOME/qtb-store" --results-root "$S"
+               --store "$HOME/qtb-store" --results-root "$S"
 $Q quality     --results-root "$S"
 $Q correctness --results-root "$S"      # skipped unless the quality gate is open
 $Q unit-tests  --results-root "$S"      # optional; if you run it, it counts
@@ -19,14 +19,14 @@ $Q cost        --results-root "$S"      # skipped unless correctness also passed
 $Q decide      --results-root "$S"
 ```
 
-The profile is chosen once, on `compile`; the later stages read it from the session. See the
+The profile is fixed on `compile`; the later stages read it from the session. See the
 [README](../README.md) for the stages, the store and the exit codes.
 
 Files: `profiles/confirm-profile/manifest.json` and `profiles/confirm-profile/policy.json`.
 Version 13 ([what changed](#version-13)).
 
 > **Do not tune on this profile.** The workload is public and fixed, with no held-back part.
-> Editing a candidate and rerunning confirm until it passes turns it into a second tuning
+> Editing a candidate and rerunning until it passes turns the benchmark into a tuning
 > loop. The harness does not count how often a workload has been decided, so keeping to
 > this is up to you.
 
@@ -47,7 +47,7 @@ this workload.
 | Deterministic | 51 | Seed-blind cases compared seed by seed; each metric may increase by at most 25% |
 | Zero-baseline | 4 | Cases whose baseline `D2` = `N2` = 0; any non-zero value fails |
 | Canary | 5 | Constant cases that must equal a frozen value |
-| Timing | 30 | T1–T19 and the preset panel from the iterations profile, plus an 8-case confirm timing panel |
+| Timing | 30 | The compile-time panel T1–T19, the preset panel, and an 8-case confirm timing panel |
 | Memory | 9 | Peak RSS of one compile in a fresh process |
 
 Quality work per revision is about 15,400 compiles.
@@ -93,8 +93,9 @@ The weights form a tree. Each family gets 1/8. Inside a family, weight is split 
 level, then size band, then topology, then basis, then input group, then variant. Adding more
 inputs to one family therefore cannot outweigh the other seven. Two consequences are stated
 openly: `square_heisenberg_n100` carries about 9.9% of the score and `su2_circular_n89` about
-9.4%, because each is the only seed-sensitive input of its family at some levels. The
-iterations profile's three circuits together carry 18.2%.
+9.4%, because each is the only seed-sensitive input of its family at some levels. The three
+100-qubit heavy-hex circuits (`qft_n100`, `square_heisenberg_n100`, `qaoa_ba_n100_3reps`)
+together carry 18.2%.
 
 ### Guard-only and exact cases
 
@@ -107,13 +108,19 @@ iterations profile's three circuits together carry 18.2%.
   (10 seeds), `multiplier_h18_n20` (100 seeds, the `hwb12` replacement), QUEKO at level 0,
   and others. Every guard must stay at or below the 2.0 per-case cap. Guards outside the
   basis panels must also satisfy `ln(ratio) ≤ 3·SE_case`.
-- **Canaries** (5): `su2_circular_n100` and `long_2q_sequence` at several levels.
+- **Canaries** (5): `su2_circular_n100` and `long_2q_sequence` at several levels. A canary
+  has a known constant output at the baseline and catches a simplification that a candidate
+  silently loses (or unexpectedly gains). Both revisions must match the constant on every
+  seed. If the baseline misses, the reference is broken (`INCONCLUSIVE`). If only the evolved
+  revision misses, in either direction, the canary is `unresolved`, which also gives
+  `INCONCLUSIVE`: the change is unexplained and needs human review.
 
 ### Cost panels
 
 | Panel | Cases | Mode |
 | --- | --- | --- |
-| `timing` | T1–T19, unchanged from the iterations profile | `timing_e2e` / `timing_reuse` |
+| `timing` | T1–T11, T14, T17 (below) | `timing_e2e` / `timing_reuse` |
+| `timing-basis` | T12, T13, T15, T16, T18, T19 (below) | `timing_reuse` |
 | `preset` | Preset construction on the three heavy-hex targets | `preset_build` |
 | `confirm-timing` | 8 cases, one large end-to-end case per family: `qft_n100` L3, `square_heisenberg_n100` L0, `qaoa_ba_n100_3reps` L3, `qv_n50_d50` L2, `multiplier_h18_n32` L0, `bv_all_ones_n100` L3, `queko_bss_53` L2, `su2_circular_n89` L0 | `timing_e2e`, seed 0 |
 | `memory` | 9 cases, the heaviest scored input of each family plus `multiplier_h18_n20` at level 2; 3 fresh processes each | `memory` |
@@ -124,18 +131,52 @@ families instead of eight, and confirm-timing one case per family instead of 20.
 validated on the cost host (A/A noise, and a layout/routing slowdown in a retained and an
 omitted family) before they are frozen (design/updated_confirm_plan.md, section 6 and V6).
 
+The T1–T19 cases:
+
+| IDs | Panel | Input | Constraints | Level | Mode |
+| --- | --- | --- | --- | --- | --- |
+| T1, T2 | `timing` | `single_h` (one `h`), `cancel_2q` (six gates that cancel) | Loose 27-qubit coupling map + basis list | Revision default | `timing_e2e` |
+| T3–T6 | `timing` | `qv_n14_d14` (98 random 2-qubit unitaries) | `melbourne_14` target | 0, 1, 2, 3 | `timing_e2e` |
+| T7–T10 | `timing` | `long_2q_sequence` | Loose Rochester map, legacy `u1,u2,u3,cx,id` basis | 0, 1, 2, 3 | `timing_e2e` |
+| T11, T14, T17 | `timing` | `qft_n100`, `square_heisenberg_n100`, `qaoa_ba_n100_3reps` on `cz` | Heavy-hex target | 2 | `timing_reuse` |
+| T12, T13, T15, T16, T18, T19 | `timing-basis` | The same three circuits on `cx` and `ecr` | Heavy-hex targets | 2 | `timing_reuse` |
+
+`timing_e2e` times a whole `transpile()` call, including option handling and target
+construction. `timing_reuse` builds the pass manager first, then times only `pm.run()`. T1–T2
+expose fixed per-call overhead that large circuits hide. T3–T10 cover every optimization level.
+
+Which panels are measured follows the change scope ([metrics.md](metrics.md#7-change-scope-and-stage-coverage)):
+
+| Panel | Measured | Guarded |
+| --- | --- | --- |
+| `timing`, `confirm-timing`, `memory` | Always | Always |
+| `timing-basis` | When the change can reach translation or optimization, or the scope is unknown | Whenever measured |
+| `preset` | Always | When the change could affect preset assembly or target handling, or the scope is unknown |
+| `companion` | When the change can reach layout or routing, or the scope is unknown | Whenever measured |
+
+The companion exists because one fixed seed times only one search path.
+
+**How a panel is measured.** Every round is one fresh process per arm (baseline, evolved)
+that loads, warms up and times each case of the panel in manifest order, with the arms in
+random order. A case's time in a round is the median of its timed calls (at least 2 calls and
+1 s); the case time is the median over rounds. A timing panel starts with a 4-round
+**screen**: if the candidate already sits inside half the noise band of the full measurement
+with no per-case breach, the panel stops. Otherwise it is measured in full (10 rounds) in a
+fresh session, and a breach triggers one fresh 20-round rerun that decides. The companion
+(3 rounds per seed) and memory (3 fresh processes per case) have no screen. The report names
+the regime each panel ended in.
+
 ## Acceptance rules (CA1–CA6)
 
-The broad rules replace the iterations rules. A confirm `PASS` does **not** also require the
-three-circuit iterations score to improve.
+All rules compare against the baseline. The formulas are in [metrics.md](metrics.md).
 
 | Rule | Records | Requirement |
 | --- | --- | --- |
-| CA1 correctness | `CA1/C0`, `CA1/C1-C5`, `CA1/C6`, `CA1/C7`, and `CA1/upstream` once `unit-tests` has started | As IA1, with C7 on 5 seeds (`clifford_seeds`) in prefix and full mode. Quality performs C0 and C6; semantic fixture checks run in the correctness stage. Unlike IA1, stage coverage is report-only: uncovered scored cases do not block a pass. |
+| CA1 correctness | `CA1/C0`, `CA1/C1-C5`, `CA1/C6`, `CA1/C7`, and `CA1/upstream` once `unit-tests` has started | Every output is legal (C0). The C1–C5 suite passes for both revisions. Routing replay verifies every scored and basis-guard output (C6). Clifford variants verify on 5 seeds (`clifford_seeds`) in prefix and full mode (C7). Quality performs C0 and C6; semantic fixture checks run in the correctness stage. Stage coverage is report-only: uncovered scored cases do not block a pass. |
 | CA2 improvement | `CA2/improvement` | `ln(D2 score) + 2·SE < ln(0.99)`, a practical 1% reduction beyond seed noise |
 | CA3 breadth | `CA3/breadth` | At least 4 of the 8 families individually satisfy `ln(D2) + 2·SE < 0`, **and** removing any one family still leaves the score below 1 |
 | CA4 guards | `CA3/primary/N2`, `CA3/cx/*`, `CA3/ecr/*`, `CA4/family/<G>/<metric>`, `CA4/optimization_level/<L>/<metric>`, `CA4/cap/...`, `CA4/exact/...` | Family and level `D2`/`N2`: `ln(score) ≤ ln(1.05) + 3·SE`. Overall `N2` and basis panels retain zero margin. Individual guard cases outside basis panels: `ln(ratio) ≤ ln(1.15) + 3·SE`. Per-case cap 2.0. Ordinary deterministic cases: each metric ≤ 1.25× baseline on every seed. Zero-baseline and canary cases remain strict. Band, topology and native-basis summaries are reported only |
-| CA5 cost | `CA5/timing`, `CA5/timing-basis`, `CA5/confirm-timing`, `CA5/memory`, `CA5/preset`, `CA5/companion` | Each panel's ratio at most 1.10, and no per-case breach (> 20% and by more than 25 ms, or 32 MiB for memory). Timing panels screen with 4 rounds and measure 10 in full ([iterations-profile.md](iterations-profile.md#timing-panels)) |
+| CA5 cost | `CA5/timing`, `CA5/timing-basis`, `CA5/confirm-timing`, `CA5/memory`, `CA5/preset`, `CA5/companion` | Each panel's ratio at most 1.10, and no per-case breach (> 20% and by more than 25 ms, or 32 MiB for memory). Timing panels screen with 4 rounds and measure 10 in full ([cost panels](#cost-panels)) |
 | CA6 completeness | `CA6/completeness` | Every observation present; determinism audit passed |
 
 Required IDs in `policy.json`: `harness/roundtrip`, `baseline/preflight`,
@@ -163,11 +204,16 @@ Report-only results:
   printed, not tested, because several family/size cells have fewer than three groups.
 - **Leave-iterations-out score**: the `D2` and `N2` scores recomputed without `qft_n100`,
   `square_heisenberg_n100` and `qaoa_ba_n100_3reps` (the policy's `iterations_groups`),
-  printed in the report. A gain that lives mostly in those three circuits improved the
-  tuning loop, not the suite.
+  printed in the report. A gain that lives mostly in those three circuits is not a broad
+  gain.
 
-Policy differences from the iterations profile: `practical_ratio` is 0.99 (versus 1.0), and
-the required set adds `CA3/breadth`, `CA5/confirm-timing` and `CA5/memory`.
+Policy values (`policy.json`): improvement multiplier 2.0, guard multiplier 3.0, practical
+ratio 0.99, quality cap 2.0 (`plain` rule), quality guard tolerances 5% (aggregate), 15%
+(individual) and 25% (deterministic), RNG seed 20260924. The upstream test budgets (4 h
+Python, 3 h Rust) apply only when `unit-tests` runs. Timing: 4 screen rounds, 10 full rounds,
+rerun multiplier 2, 1 warm-up, at least 2 timed calls and 1 s per round; companion seeds 0–9
+at 3 rounds each; 3 memory processes. Cost thresholds (fixed, never calibrated): panel ratio
+1.10, case ratio 1.20 above a 25 ms (32 MiB) floor, screen fraction 0.5.
 
 ## Version 13
 
@@ -177,7 +223,7 @@ alone no longer make the verdict `INCONCLUSIVE`. The C1–C5 suite, API checks, 
 baseline preflight, numerical tolerances, timeout handling, quality guards and cost checks
 are unchanged. Actual correctness failures and unresolved required tests still block a pass.
 The workload is unchanged. Existing sessions retain their archived coverage requirement;
-new sessions use version 13. The iterations profile retains mandatory stage coverage.
+new sessions use version 13.
 
 ## Version 12
 
@@ -254,10 +300,8 @@ cluster A/A (V3), not measured results.
 ## Statistical power
 
 The score averages many roughly independent cases, so its paired standard error over 100
-seeds is about 0.2%: roughly three times smaller than the iterations profile's. A real gain
-that passed iterations has a good chance here, and a lucky one very little. What limits the
-confirm profile is the number of independent inputs, not the number of seeds. That is why
-`U_instance` is reported.
+seeds is about 0.2%. What limits the profile is the number of independent inputs, not the
+number of seeds. That is why `U_instance` is reported.
 
 ## Budget
 

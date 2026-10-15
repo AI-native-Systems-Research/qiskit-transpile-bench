@@ -47,6 +47,8 @@ def launch(world, tmp_path, backend, *extra, name="s1"):
         str(world.sources["main"]),
         "--evolved",
         str(world.sources["idea"]),
+        "--profile",
+        "iterations-profile",
         "--cost-ncpus",
         "56",
         *extra,

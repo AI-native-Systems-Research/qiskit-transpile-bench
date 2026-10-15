@@ -69,8 +69,7 @@ command -v bsub bjobs bhist bkill git uv rustup cc c++
 
 - **Two Qiskit checkouts** on the shared filesystem: `--baseline` (the reference) and
   `--evolved` (your change). They are snapshotted by `compile` and never modified.
-- **A profile**: `--profile iterations-profile` (the default) while iterating. Confirm once
-  with `--profile confirm-profile` in a separate session, with a new `--results-root`.
+- **The profile**: `--profile confirm-profile` (the default).
 
 ## 3. Choose the shared paths
 
@@ -129,7 +128,7 @@ uv run python lsf/submit.py \
   --results-root /shared/qtb-sessions/idea1 \
   --baseline /shared/qiskit-baseline \
   --evolved /shared/qiskit-evolved \
-  --profile iterations-profile \
+  --profile confirm-profile \
   --queue normal \
   --cost-ncpus 56 \
   --cost-max-r1m 10

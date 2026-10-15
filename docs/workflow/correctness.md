@@ -30,7 +30,7 @@ rules](../sessions.md) for prerequisites, retries and stage exit codes.
 | C4 | Symbolic parameters and declared numeric bindings |
 | C5 | Scheduling validity |
 | API | Input immutability, pass-manager reuse, batch order and expected errors |
-| C7 | Clifford variants at full width on `clifford_seeds` seeds (iterations 3, confirm 5); prefix mode, plus full mode where `clifford_full_mode` is set (confirm) |
+| C7 | Clifford variants at full width on `clifford_seeds` (5) seeds; prefix mode, plus full mode where `clifford_full_mode` is set |
 
 C7 compiles every case, mode and seed as its own worker job and verifies each output as soon
 as it lands, so compiles and verification overlap across the workers: on confirm, 18 cases ×

@@ -33,7 +33,21 @@ def main():
                     error=f"{type(exc).__name__}: {exc}",
                     traceback=traceback.format_exc(),
                 )
-            stream.write(canonical_bytes(result) + b"\n")
+            try:
+                line = canonical_bytes(result)
+            except Exception as exc:
+                # An unwritable result fails its own seed, not the rest of the batch.
+                line = canonical_bytes(
+                    {
+                        "protocol": PROTOCOL,
+                        "mode": job["mode"],
+                        "seed": seed,
+                        "status": "error",
+                        "error": f"Result not serializable: {type(exc).__name__}: {exc}",
+                        "traceback": traceback.format_exc(),
+                    }
+                )
+            stream.write(line + b"\n")
             os.fsync(stream.fileno())
     return 0
 

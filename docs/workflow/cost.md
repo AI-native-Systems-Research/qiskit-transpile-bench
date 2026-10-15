@@ -90,19 +90,19 @@ are not used here.
 | Timing | End-to-end `transpile()` and reused-pass-manager compiles | Always |
 | Timing basis | `cx`/`ecr` twins of scored cases | Translation, optimization or unknown change scope |
 | Preset | Pass-manager construction | Measured always; binds only for relevant or unknown scope |
-| Confirm timing | Additional confirm circuits | Confirm profile |
-| Memory | Peak RSS from fresh processes | Confirm profile |
-| Companion | Average timing over the policy's `companion_seeds` (confirm 0–9, iterations 0–19) | Layout, routing or unknown change scope |
+| Confirm timing | One large end-to-end case per family | Always |
+| Memory | Peak RSS from fresh processes | Always |
+| Companion | Average timing over the policy's `companion_seeds` (0–9) | Layout, routing or unknown change scope |
 
-[Profiles](../README.md#profiles) define the case membership;
+[The profile](../README.md#profile) defines the case membership;
 [metrics](../metrics.md#6-cost-time-and-memory) defines every estimator, threshold and
 regime. The change scope is inferred from the snapshot diff; it cannot be supplied by hand.
 
 ## Screen, full measurement and rerun
 
 A timing panel first gets a four-round screen. If it clears half the panel noise band with
-no per-case breach, it stops there. Otherwise the panel gets a full measurement: six rounds
-on iterations or ten on confirm. A candidate-only breach triggers one fresh rerun with twice
+no per-case breach, it stops there. Otherwise the panel gets a full measurement of ten
+rounds. A candidate-only breach triggers one fresh rerun with twice
 the full count. A repeat breach is `failed`; a clean rerun is `passed_on_rerun`. Companion
 and memory panels have no screen and use their own counts.
 
@@ -116,9 +116,8 @@ come from the frozen policy, never from the samples. On LSF the evidence validat
 one measured interval per seed per companion worker job (`qtb-lsf-monitor/3` is unchanged).
 A policy without the key (before version 7) uses 0–19, so archived bundles replay as before.
 `measurement_protocol.companion_groups`, when present, names the input groups whose first
-scored level-2 case forms the companion panel, in that order (confirm: G2, G5, G6 and G8).
-Without it, confirm uses the memory panel's groups except `multiplier_h18_n20`, and
-iterations the timing cases whose only mode is `timing_reuse`. `decide` derives the panel
+scored level-2 case forms the companion panel, in that order (G2, G5, G6 and G8).
+Without it, the memory panel's groups except `multiplier_h18_n20` are used. `decide` derives the panel
 from the archived policy.
 
 The fixed thresholds are `panel_ratio = 1.10`, `case_ratio = 1.20`, a 25 ms per-case timing
@@ -159,7 +158,6 @@ These are design-probe estimates, not a measured full comparison:
 
 | Profile | Typical panels | Worst timing path |
 | --- | --- | --- |
-| Iterations | Screen: about 6–7 min; add 10–20 min companion for layout/routing | 22 rounds (screen + full + rerun), about 35 min |
 | Confirm | Version 7, every screen passing: about 13 min (timing 3, preset 1, confirm-timing 5, memory 4); timing-basis adds about 2.5 and the companion about 6 (unmeasured) when the scope requires them | 34 timing rounds plus a possible memory rerun |
 
 Monitoring aborts a contaminated invocation at its first bad window, usually within
