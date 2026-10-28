@@ -66,9 +66,9 @@ def test_report_uses_archived_quality_and_zero_baseline_evidence():
     assert decision["objective"][0]["score"] == 0.81
     assert math.isclose(decision["trade_score"], 0.99)
     assert decision["zero_baseline_deltas"]["cases"][0]["worst_seed"] == 1
-    assert decision["cost_thresholds"] == thresholds
-    assert "fixed by policy, not calibrated" in report
-    assert "panel ≤ 1.03×" in report and "25 ms" in report and "32 MiB" in report
+    assert "cost_thresholds" not in decision
+    assert "## Compilation cost" not in report
+    assert "## Quality runtime" in report
     assert "| family | G1 | D2 |" in report
     assert "| optimization_level | 2 | D2 |" in report
     assert "| zero | D2 | 1 | 1 | 0 | 1 |" in report

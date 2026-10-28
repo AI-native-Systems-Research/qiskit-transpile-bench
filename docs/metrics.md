@@ -178,102 +178,29 @@ rate is not measured (section 5).
   both passed. Otherwise every quality record is `unresolved`.
 - Failures are never dropped from a denominator, and weights are never silently changed.
 
-## 5. No per-machine calibration
+## 5. Quality runtime
 
-Earlier versions compiled the baseline on two extra seed blocks to estimate the family-wise
-false-rejection rate of the guards, and timed the baseline against itself to measure the
-machine's cost noise. Version 4 of the profiles removed that phase (see
-[design/remove-calibration-plan.md](../design/remove-calibration-plan.md)):
+Every quality case and B0 seed receives a fresh uninstrumented end-to-end transpilation
+on both revisions. A single warmup per case/revision is excluded. Imports, fixture loading,
+output serialization and checks are outside the clock. Workers run sequentially; arm order
+alternates across cases. Machine load is neither monitored nor corrected.
 
-- The quality guards use their fixed multipliers only. Their combined false-rejection rate on
-  a given runner is not estimated, and the report says so.
-- The cost guards use the fixed thresholds of section 6. Whether they match a runner's noise
-  is checked, if at all, by one manual A/A session (same source as baseline and evolved).
-- Deterministic, zero-baseline and canary constants are checked on the B0 seeds only. A
-  baseline that misses its own constant there gives `INCONCLUSIVE`.
+For each case, reports show arithmetic mean seconds for each revision, the difference
+`evolved - baseline`, ratio `evolved / baseline`, and improvement percentage
+`100 * (baseline - evolved) / baseline`. Aggregate seconds sum the entire paired workload;
+the ratio of those sums is workload-weighted. The geometric mean case ratio is also shown.
+Missing or invalid measurements are counted and leave the aggregate unavailable.
 
-## 6. Cost: time and memory
+Runtime differences are descriptive. `quality/runtime` requires complete measurements,
+without applying the retired cost-panel thresholds. Memory panels, C1–C5, C7 and stage
+coverage requirements are removed from current profiles.
 
-Cost has its own estimators. The quality seed estimator is never applied to cost.
+## 6. Benchpress
 
-```text
-t(c, arm)     = median over rounds of ( median over timed calls in that round )
-companion     = mean over the policy's companion_seeds of the above (arithmetic mean: users
-                pay the average; confirm 0–9, iterations 0–19)
-rss(c, arm)   = median over fresh processes of peak RSS
-ln_panel      = Σ_c u_c · ln( t(c, evolved) / t(c, baseline) )   u_c = 1/|panel|
-                (memory: equal weight per family)
-```
-
-- **Protocol** (`policy.json` → `measurement_protocol`): timing panels are measured in up to
-  three regimes, each a fresh session: a `screen_rounds` screen (4), a `timing_rounds` full
-  measurement (6 in the iterations profile, 10 in confirm) and a rerun at `rerun_multiplier`
-  times the full count. The companion has 3 rounds per seed and memory `memory_processes`
-  processes (3 in confirm, 5 in iterations), each with a doubled rerun and no screen. A timing round is one fresh process per arm that loads,
-  warms up (`warmups` = 1 call) and times every case of the panel in manifest order, timing
-  each until at least `minimum_calls` (2) calls and `minimum_ns` (1 s) have accumulated; the
-  companion and memory use one fresh process per arm and case. The two arms (baseline,
-  evolved) run interleaved in random order within each round. Nothing else may run on the
-  measured core. On LSF the stage holds nine exclusive physical cores, and a monitor checks
-  every window of every worker for foreign CPU activity; the first
-  failing measured window discards the invocation (`noisy`) and the manager measures again in a new
-  job ([cost](workflow/cost.md#measurement-modes)). Run directly, the stage takes an
-  exclusive runner lock and waits up to 5 minutes for the load average to fall below half
-  the core count; if it does not, the result is `unresolved`.
-- **Thresholds** (`policy.json` → `cost_thresholds`), the same for every runner:
-  `panel_ratio` 1.10, `case_ratio` 1.20, `case_floor_ns` 25 ms, `case_floor_bytes` 32 MiB,
-  `screen_fraction` 0.5. Every cost bundle records the digest of this block
-  (`thresholds_id`), and a bundle judged under different thresholds is `unresolved`.
-- **Guard:** a panel breaches if `ln_panel > ln(panel_ratio)`, or if any case has
-  `ratio > case_ratio` **and** an absolute delta above its floor. The floor keeps jitter on
-  millisecond cases (T1, T2, `preset_build`) from counting as a regression.
-- **Screen:** the screen passes only when the candidate's `ln_panel` is within
-  `screen_fraction × ln(panel_ratio)` with no per-case breach. A clear screen is a `passed`
-  panel; anything else discards nothing but proceeds to the full measurement in a fresh
-  session.
-- **One rerun:** if the candidate breaches in the full measurement, the whole panel is
-  measured once more with doubled rounds. A breach again → `failed`; a pass →
-  `passed_on_rerun`.
-
-Cost is its own stage, `cost`, because it needs quiet, exclusive cores and can take hours
-of wall time. It runs after `correctness` and only when the quality gate is open
-([quality gate](workflow/quality.md#the-quality-gate)): the candidate improved and every quality check passed, or the run is an A/A run
-(both builds have the same ID) and every quality check passed. An A/A run never improves, but
-its cost panels are the known-outcome check that timing and memory report no change. When
-correctness found a failure, `cost` records `skipped` without measuring. Cost samples are
-never taken from the baseline store: both arms are measured in the same session.
-
-## 7. Change scope and stage coverage
-
-Stage coverage records whether a **verified** correctness check covers every transpiler
-stage a candidate changed (`evaluator/scope.py`):
-
-1. The changed files are the difference between the two snapshots.
-2. Each path is mapped to stages, per optimization level. Examples: `sabre` →
-   layout, routing; `vf2` → layout, routing (+ optimization at level 3); two-qubit
-   decomposition or unitary synthesis → init, translation, optimization; commutative
-   cancellation → init, optimization. Tests, docs, release notes and lock files are ignored.
-   Any other path under `qiskit/` or `crates/*/src/` counts as **all stages**, and so does
-   any path the mapping does not recognize. There is no way to declare a scope by hand.
-3. For every scored case, some verified check must cover all changed stages, for an applicable
-   input domain, without having substituted a changed component. Otherwise
-   `IA1/stage-coverage` (`CA1/...`) is `unresolved`.
-
-The rule combines the quality checks (C0, C6) with the C7 Clifford checks of the
-`correctness` stage, so `decide` computes `*1/stage-coverage` once both stages are complete.
-If either has not run, for example because the quality gate is closed, the record is missing.
-
-**Confirm version 13:** `CA1/stage-coverage` is report-only. An unresolved coverage record
-and its uncovered cases remain in `decision.json` and the report, but the record is not in
-`required_ids` and its gaps are not listed as verdict-blocking reasons. Acceptance still
-requires the correctness test suite and all other required checks. This establishes passing
-test-suite evidence, not complete semantic coverage of the scored workload.
-
-**Iterations and archived confirm policies:** stage coverage remains mandatory when its ID
-is in the frozen policy's `required_ids`. Routing replay (C6) covers layout and routing on
-every scored output, so a layout/routing-only change can pass this requirement. A change to
-optimization can remain `INCONCLUSIVE` where no applicable check covers it. Confirm version
-12 removed C1-lite; version 13 changes only how the remaining coverage gaps affect acceptance.
+Benchpress compares D2/N2 and a single-call `pm.run` runtime on 50 frozen circuit/target
+entries at levels 2 and 3 and seeds 0, 1 and 2. It reports per-case median seed differences
+and ratios, and aggregate comparisons by level. Preset construction is outside its timer.
+These numbers are descriptive; `benchpress/completeness` requires the panel to finish.
 
 ## 8. From records to verdict
 
@@ -322,11 +249,9 @@ required records.
 
 ### Workflow conditions
 
-[quality](workflow/quality.md#the-quality-gate) owns the gate that controls later stages.
-[decide](workflow/decide.md#committed-evidence-and-required-stages) explains which committed
-stages count, how unfinished stages impose `INCONCLUSIVE`, optional unit tests, and the
-baseline-preflight exception. The estimator and record precedence above stay the same;
-the workflow determines which evidence exists.
+Compile, quality and Benchpress are required. Optional unit-tests binds the verdict once
+started. Missing/unfinished required stages keep the verdict inconclusive; harness errors
+remain errors. The quality gate controls optional unit-tests only.
 
 ## Diagnostics that never enter a decision
 

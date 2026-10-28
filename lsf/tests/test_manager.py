@@ -1,21 +1,18 @@
 """The manager against a fake scheduler, with every job run in-process through the real
 ``lsf.job`` entry point and the harness's stage runner over the fake stage work."""
 
-import json
 import signal
 
 import pytest
 
 from qtb.canonical import read_json
-from qtb.coordinator import costs
 from qtb.coordinator.stages import clean_status, read_state
 from qtb.coordinator.storage import locked
-from qtb.errors import Contaminated
 
-from lsf import control, lsf_directory, retry, submit
+from lsf import control, lsf_directory, submit
 from lsf.manager import Manager
 from lsf.retry import Ledger
-from lsf.tests.conftest import HOST, FakeScheduler
+from lsf.tests.conftest import FakeScheduler
 
 
 class Clock:
@@ -47,8 +44,6 @@ def launch(world, tmp_path, backend, *extra, name="s1"):
         str(world.sources["main"]),
         "--evolved",
         str(world.sources["idea"]),
-        "--cost-ncpus",
-        "56",
         *extra,
     ]
     assert submit.main(argv, backend=backend, environ={}) == 0
@@ -69,19 +64,6 @@ def manager(lsf_dir, backend, clock=None, job_id="900"):
     )
 
 
-def noisy(monkeypatch, failures):
-    """The first ``failures`` cost measurements detect interference."""
-    measured = costs.measure_costs
-    calls = []
-
-    def measure(comparison):
-        calls.append(1)
-        if len(calls) <= failures:
-            raise Contaminated("A: foreign CPU 0.300 s > 0.100 s", {"window": {"index": 1}})
-        return measured(comparison)
-
-    monkeypatch.setattr("qtb.coordinator.costs.measure_costs", measure)
-    return calls
 
 
 def stages_of(backend):
@@ -100,35 +82,30 @@ def test_the_whole_pipeline_runs_with_fixed_allocations(world, tmp_path):
         "manager",
         "compile",
         "quality",
-        "correctness",
+        "benchpress",
         "unit-tests",
-        "cost",
         "clean",
     ]
-    for kind in ("manager", "compile", "quality", "correctness", "unit-tests", "clean"):
+    for kind in ("manager", "compile", "quality", "benchpress", "unit-tests", "clean"):
         argv = argv_of(backend, kind)
         assert argv[argv.index("-n") + 1] == "16" and "-x" not in argv
         assert argv[argv.index("-q") + 1] == "normal"
         assert "affinity[" not in argv[argv.index("-R") + 1]
-    cost = argv_of(backend, "cost")
-    assert cost[cost.index("-n") + 1] == "9" and "-x" not in cost
-    assert cost[cost.index("-R") + 1] == (
-        "select[r1m < 10 && ncpus == 56] span[hosts=1] "
-        "affinity[core(1,exclusive=(core,alljobs))] rusage[mem=16]"
-    )
     assert "-r" in argv_of(backend, "manager")
     ledger = Ledger.load(lsf_dir / "ledger.json")
     assert ledger.data["decide"]["status"] == "PASS"
     assert ledger.data["cleanup"]["status"] == "complete"
     assert clean_status(session) == "complete"
-    cost_state = read_state(session, "cost")
-    assert cost_state["invocation"]["attempt"] == 1 and cost_state["scheduler"]["slots"] == 9
+    state = read_state(session, "benchpress")
+    assert state["scheduler"]["slots"] == 16
+    assert "cost_evidence" not in read_json(session / "run.json")
     report = (lsf_dir / "report.md").read_text()
-    assert "Verdict: **PASS**" in report and "1 of 21 cost jobs used" in report
+    assert "Verdict: **PASS**" in report and "benchpress" in report
+    assert "Cost attempts" not in report
     # Orchestration records and logs live outside the session and survive its cleanup.
     logs = lsf_dir / "logs" / ledger.data["run_id"]
     assert (logs / "manager-1.log").exists() and (logs / "launcher.log").exists()
-    assert len(list((logs / "jobs").glob("job-*.log"))) == 6
+    assert len(list((logs / "jobs").glob("job-*.log"))) == 5
 
 
 def test_by_default_unit_tests_are_not_submitted(world, tmp_path):
@@ -146,215 +123,36 @@ def test_gate_closed_stages_still_run_as_jobs_and_cleanup_follows_any_verdict(wo
     assert stages_of(backend)[1:] == [
         "compile",
         "quality",
-        "correctness",
+        "benchpress",
         "unit-tests",
-        "cost",
         "clean",
     ]
-    assert [read_state(session, s)["status"] for s in ("correctness", "unit-tests", "cost")] == [
-        "skipped"
-    ] * 3
+    assert read_state(session, "unit-tests")["status"] == "skipped"
+    assert read_state(session, "benchpress")["status"] == "complete"
     ledger = Ledger.load(lsf_dir / "ledger.json")
-    (attempt,) = ledger.cost_attempts()
-    assert attempt["outcome"]["kind"] == "skipped" and attempt["consumes_budget"] is False
-    assert retry.budget_used(ledger) == 0
     assert ledger.data["cleanup"]["status"] == "complete"
 
 
-def test_noisy_cost_is_retried_in_new_jobs_until_it_is_clean(world, tmp_path, monkeypatch):
-    noisy(monkeypatch, failures=2)
-    backend = FakeScheduler()
-    session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 0
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    attempts = ledger.cost_attempts()
-    assert [(a["attempt"], a["outcome"]["kind"]) for a in attempts] == [
-        (1, "noisy"),
-        (2, "noisy"),
-        (3, "complete"),
-    ]
-    assert len({a["job_id"] for a in attempts}) == 3
-    assert read_state(session, "cost")["invocation"]["job_key"] == attempts[-1]["key"]
-    report = read_json(lsf_dir / "report.json")
-    assert report["cost"]["used"] == 3 and report["cost"]["remaining"] == 18
-    assert "A: foreign CPU" in report["cost"]["attempts"][0]["reason"]
 
 
-def cost_requests(backend):
-    argvs = [spec.argv() for spec in backend.submitted if spec.kind == "cost"]
-    return [argv[argv.index("-R") + 1] for argv in argvs]
 
 
-def test_a_host_noisy_twice_is_excluded_from_later_cost_attempts(world, tmp_path, monkeypatch):
-    noisy(monkeypatch, failures=2)
-    backend = FakeScheduler()
-    session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 0
-    first, second, third = cost_requests(backend)
-    assert "hname" not in first and "hname" not in second
-    assert f"hname != {HOST}" in third
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    assert retry.excluded_hosts(ledger) == [HOST]
-    assert ledger.cost_attempts()[0]["scheduler"]["host"] == HOST
 
 
-def test_excluded_hosts_count_idle_probe_failures_at_once_and_keep_the_latest():
-    def attempt(n, host, phase=None, kind="noisy"):
-        contamination = {"phase": phase} if phase else {"window": {"index": 1}}
-        return {
-            "stage": "cost",
-            "key": f"cost-a{n:02d}",
-            "attempt": n,
-            "status": "terminal",
-            "scheduler": {"host": host},
-            "outcome": {"kind": kind, "contamination": contamination},
-        }
-
-    entries = [
-        attempt(1, "idle", phase="idle probe"),
-        attempt(2, "once"),
-        attempt(3, "twice"),
-        attempt(4, "twice"),
-        attempt(5, "failed", kind="failed"),
-        attempt(6, "failed", kind="failed"),
-    ]
-    fake = type("L", (), {"cost_attempts": lambda self: entries})()
-    assert retry.excluded_hosts(fake) == ["idle", "twice"]
-    entries[:] = [attempt(n, f"h{n}", phase="idle probe") for n in range(1, 12)]
-    assert retry.excluded_hosts(fake) == [f"h{n}" for n in range(4, 12)]
-    assert len(retry.excluded_hosts(fake)) == retry.MAX_EXCLUDED_HOSTS
 
 
-def test_exactly_twenty_retries_then_exhaustion_without_a_false_pass(world, tmp_path, monkeypatch):
-    noisy(monkeypatch, failures=10**6)
-    backend = FakeScheduler()
-    session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 30
-    assert stages_of(backend).count("cost") == retry.MAX_COST_ATTEMPTS == 21
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    assert ledger.data["cost"]["exhausted"]["used"] == 21
-    assert read_state(session, "cost")["status"] == "noisy"  # no harness state was edited
-    assert ledger.data["decide"]["status"] == "INCONCLUSIVE"
-    assert ledger.data["cleanup"]["status"] == "skipped"
-    assert "cost (noisy)" in ledger.data["cleanup"]["reason"]
-    assert "clean" not in stages_of(backend)
-    report = (lsf_dir / "report.md").read_text()
-    assert "Retry budget exhausted" in report and "not an observed cost regression" in report
-    notes = " ".join(ledger.data["decide"]["notes"])
-    assert "no clean measurement" in notes
 
 
-def test_attempt_counting_survives_a_manager_killed_mid_submission(world, tmp_path, monkeypatch):
-    noisy(monkeypatch, failures=10**6)
-    backend = FakeScheduler()
-    session, lsf_dir = launch(world, tmp_path, backend)
-    submit_ = backend.submit
-
-    def dying(spec):
-        if spec.kind == "cost" and "-a06-" in spec.name:
-            raise Killed()  # after the intent was recorded, before bsub answered
-        return submit_(spec)
-
-    backend.submit = dying
-    with pytest.raises(Killed):
-        manager(lsf_dir, backend).run()
-    backend.submit = submit_
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    assert [a["status"] for a in ledger.cost_attempts()][-1] == "reserved"
-    # The requeued manager looks for attempt 6 by name for an hour before giving up on it.
-    assert manager(lsf_dir, backend).run() == 40
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    attempts = ledger.cost_attempts()
-    assert len(attempts) == 6 and attempts[5]["status"] == "unreconciled"
-    assert attempts[5]["name_lookups"] >= 60 and attempts[5]["outcome"]["kind"] == "lost"
-    # It still counts, and without an outcome it allows no retry.
-    assert retry.budget_used(ledger) == 6
-    assert "ended lost" in ledger.data["cost"]["stopped"]["reason"]
-    assert stages_of(backend).count("cost") == 5
-    assert len(ledger.data["managers"]) == 2
-    assert ledger.data["decide"] is None  # the missing job might still be writing
-    logs = lsf_dir / "logs" / ledger.data["run_id"]
-    events = [json.loads(line) for line in (logs / "manager-2.events.jsonl").open()]
-    assert any(e["event"] == "reconcile.not_found" for e in events)
 
 
-def test_a_late_answer_to_a_lost_submission_is_adopted_not_duplicated(world, tmp_path):
-    backend = FakeScheduler()
-    backend.script["cost-a01"] = ["lost"]
-    find = backend.find
-    calls = []
-
-    def slow_find(name):
-        calls.append(name)
-        return find(name) if len(calls) > 5 else []  # mbatchd lists it only later
-
-    backend.find = slow_find
-    session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 0
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    (attempt,) = ledger.cost_attempts()
-    assert attempt["outcome"]["kind"] == "complete" and attempt["name_lookups"] == 5
-    assert stages_of(backend).count("cost") == 1
 
 
-def test_a_killed_last_attempt_consumes_its_budget_and_is_not_retried(world, tmp_path, monkeypatch):
-    noisy(monkeypatch, failures=10**6)
-    backend = FakeScheduler()
-    run_job = backend.run_job
-
-    def runner(spec, environ):
-        if spec.kind == "cost" and "-a21-" in spec.name:
-            return 137  # LSF killed it before it reported anything
-        return run_job(spec, environ)
-
-    backend.runner = runner
-    session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 30
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    last = ledger.cost_attempts()[-1]
-    assert last["attempt"] == 21 and last["outcome"]["kind"] == "killed"
-    assert last["consumes_budget"] is True
-    assert stages_of(backend).count("cost") == 21
 
 
-def test_a_killed_attempt_is_not_a_noise_retry(world, tmp_path):
-    backend = FakeScheduler()
-    run_job = backend.run_job
-    backend.runner = lambda spec, env: 137 if spec.kind == "cost" else run_job(spec, env)
-    session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 30
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    assert stages_of(backend).count("cost") == 1
-    assert "only positive contamination evidence" in ledger.data["cost"]["stopped"]["reason"]
 
 
-def test_a_lost_submission_response_is_reconciled_by_name(world, tmp_path):
-    backend = FakeScheduler()
-    backend.script["cost-a01"] = ["lost"]
-    session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 0
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    (attempt,) = ledger.cost_attempts()
-    assert attempt["job_id"] and attempt["submissions"][0]["outcome"] == "ambiguous"
-    assert stages_of(backend).count("cost") == 1
 
 
-def test_rejected_submissions_are_retried_without_consuming_budget(world, tmp_path):
-    backend = FakeScheduler()
-    backend.script["cost-a01"] = ["rejected"]
-    session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 0
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    (attempt,) = ledger.cost_attempts()
-    assert [s["outcome"] for s in attempt["submissions"]] == ["rejected", "accepted"]
-    assert retry.budget_used(ledger) == 1
-    backend = FakeScheduler()
-    backend.script["quality"] = ["rejected"] * 3
-    session, lsf_dir = launch(world, tmp_path, backend, name="s2")
-    assert manager(lsf_dir, backend).run() == 30
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    assert ledger.latest("quality") is None  # every quality submission was rejected
-    assert "rejected the quality job 3 times" in read_json(lsf_dir / "report.json")["stop_reason"]
 
 
 def test_queue_waits_count_toward_the_deadline(world, tmp_path):
@@ -364,7 +162,7 @@ def test_queue_waits_count_toward_the_deadline(world, tmp_path):
     ledger = Ledger.load(lsf_dir / "ledger.json")
     report = read_json(lsf_dir / "report.json")
     # quality (12 h) no longer fits before the manager's internal deadline.
-    assert "quality needs up to 12:00" in report["stop_reason"]
+    assert "needs up to 12:00" in report["stop_reason"]
     assert ledger.latest("quality") is None
     assert ledger.data["cleanup"]["status"] == "skipped"
     backend = FakeScheduler(pend_polls=10**9)  # never dispatched
@@ -374,12 +172,12 @@ def test_queue_waits_count_toward_the_deadline(world, tmp_path):
     assert compile_["outcome"]["kind"] == "cancelled" and backend.cancelled == [compile_["job_id"]]
 
 
-def test_a_failed_stage_stops_the_pipeline_but_decide_and_cleanup_still_run(world, tmp_path):
+def test_benchpress_runs_after_quality_failure_and_decide_records_the_error(world, tmp_path):
     world.knobs.fail_once.add("quality")
     backend = FakeScheduler()
     session, lsf_dir = launch(world, tmp_path, backend)
     assert manager(lsf_dir, backend).run() == 40
-    assert stages_of(backend)[1:] == ["compile", "quality", "clean"]
+    assert stages_of(backend)[1:] == ["compile", "quality", "benchpress", "clean"]
     ledger = Ledger.load(lsf_dir / "ledger.json")
     assert ledger.latest("quality")["outcome"]["kind"] == "failed"
     assert ledger.data["decide"]["status"] == "ERROR"
@@ -486,28 +284,6 @@ def test_reap_and_stop_respect_a_running_manager(world, tmp_path):
     assert control.main(["stop", "--results-root", str(session)], other, lines.append) == 41
 
 
-def test_an_idle_probe_landing_is_retried_and_reported(world, tmp_path):
-    from lsf.tests.conftest import SyntheticProbe
-
-    backend = FakeScheduler()
-    probes = []
-
-    def factory():
-        noisy_host = not probes
-        probes.append(noisy_host)
-        return SyntheticProbe(foreign=(lambda t: 0.9) if noisy_host else None)
-
-    backend.probe_factory = factory
-    session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 0
-    report = read_json(lsf_dir / "report.json")
-    first, second = report["cost"]["attempts"]
-    assert first["outcome"] == "noisy" and first["phase"] == "idle probe"
-    assert "involuntary_per_s" not in first and first["foreign_fraction"] > 0.5
-    assert second["outcome"] == "complete" and second["cpu"] == "Synthetic Xeon"
-    assert second["preflight"].endswith("preflight.json")
-    assert "idle probe" in (lsf_dir / "report.md").read_text()
-    assert f"hname != {HOST}" in cost_requests(backend)[1]  # excluded after one idle failure
 
 
 def test_a_requeued_manager_reads_the_ledger_only_under_the_lock(world, tmp_path):
@@ -537,7 +313,7 @@ def test_a_requeued_manager_reads_the_ledger_only_under_the_lock(world, tmp_path
 
 def test_a_second_signal_does_not_abort_the_cancellation(world, tmp_path):
     backend = FakeScheduler()
-    backend.hold.update({"-correctness-", "-unit-tests-"})
+    backend.hold.add("-unit-tests-")
     backend.on_start = lambda spec: (
         signal.raise_signal(signal.SIGINT) if spec.kind == "unit-tests" else None
     )
@@ -551,9 +327,8 @@ def test_a_second_signal_does_not_abort_the_cancellation(world, tmp_path):
     session, lsf_dir = launch(world, tmp_path, backend, "--unit-tests")
     assert manager(lsf_dir, backend).run() == 128 + signal.SIGINT
     ledger = Ledger.load(lsf_dir / "ledger.json")
-    for stage in ("correctness", "unit-tests"):
-        assert ledger.latest(stage)["outcome"]["kind"] == "cancelled"
-    assert len(backend.cancelled) == 2
+    assert ledger.latest("unit-tests")["outcome"]["kind"] == "cancelled"
+    assert len(backend.cancelled) == 1
 
 
 def test_a_job_whose_identity_cannot_be_checked_is_never_cancelled(world, tmp_path):
@@ -656,93 +431,56 @@ def resume(session, backend, *extra):
     return submit.main(argv, backend=backend, environ={})
 
 
-def exhausted(world, tmp_path, monkeypatch):
-    """A session whose cost retries ran out; the next measurement is clean."""
-    noisy(monkeypatch, failures=retry.MAX_COST_ATTEMPTS)
+
+
+
+
+
+
+
+
+def test_rejected_benchpress_submission_is_retried_without_duplicate_jobs(world, tmp_path):
     backend = FakeScheduler()
+    backend.script["benchpress"] = ["rejected"]
     session, lsf_dir = launch(world, tmp_path, backend)
-    assert manager(lsf_dir, backend).run() == 30
-    return backend, session, lsf_dir
+    assert manager(lsf_dir, backend).run() == 0
+    ledger = Ledger.load(lsf_dir / "ledger.json")
+    assert len(ledger.jobs("benchpress")) == 1
+    assert len(ledger.latest("benchpress")["submissions"]) == 2
+    assert read_state(session, "benchpress")["status"] == "complete"
 
 
-def test_a_resume_after_exhaustion_gets_a_fresh_budget(world, tmp_path, monkeypatch, capsys):
-    backend, session, lsf_dir = exhausted(world, tmp_path, monkeypatch)
-    assert resume(session, backend) == 41
-    assert "still PEND" in capsys.readouterr().err  # the first manager is still in LSF
+def test_resume_continues_unfinished_benchpress_without_repeating_quality(world, tmp_path, capsys):
+    backend = FakeScheduler()
+    backend.hold.add("-benchpress-")
+    backend.on_start = lambda spec: (
+        signal.raise_signal(signal.SIGTERM) if spec.kind == "benchpress" else None
+    )
+    session, lsf_dir = launch(world, tmp_path, backend)
+    assert manager(lsf_dir, backend).run() == 128 + signal.SIGTERM
+    assert resume(session, backend) == 41  # the recorded manager has not ended in LSF
     end_managers(backend)
+    backend.hold.clear()
+    backend.on_start = None
     assert resume(session, backend) == 0
-    out = capsys.readouterr().out
-    assert "Resume 1" in out and "cost unfinished" in out
-    assert backend.submitted[-1].name.endswith("-manager-r1")
+    assert "benchpress unfinished" in capsys.readouterr().out
     before = len(backend.submitted)
     assert manager(lsf_dir, backend, job_id="901").run() == 0
-    assert stages_of(backend)[before:] == ["cost", "clean"]  # finished stages never rerun
+    assert stages_of(backend)[before:] == ["benchpress", "clean"]
     ledger = Ledger.load(lsf_dir / "ledger.json")
     assert ledger.epoch == 1
-    (record,) = ledger.data["resumes"]
-    assert record["pending"] == ["cost"] and record["manager"] == "manager-r1"
-    assert record["previous"]["cost"]["exhausted"]["used"] == 21
-    assert record["previous"]["decide"]["status"] == "INCONCLUSIVE"
-    assert [e["attempt"] for e in ledger.cost_attempts()] == [22]
-    assert retry.budget_used(ledger) == 1
-    assert ledger.job("manager")["status"] == "terminal"
-    assert ledger.data["decide"]["status"] == "PASS"
-    assert ledger.data["cleanup"]["status"] == "complete"
-    report = (lsf_dir / "report.md").read_text()
-    assert "Resume 1" in report and "ended INCONCLUSIVE after 21 cost jobs" in report
-    assert "1 of 21 cost jobs used" in report
-    lines = []
-    control.main(["status", "--results-root", str(session)], backend, lines.append)
-    assert "resume 1" in lines[0]
-    end_managers(backend, 0)
-    assert resume(session, backend) == 41
-    assert "is cleaned" in capsys.readouterr().err
+    assert ledger.data["resumes"][0]["pending"] == ["benchpress"]
+    assert "Resume 1" in (lsf_dir / "report.md").read_text()
 
 
-def test_a_cost_pinned_to_an_older_harness_needs_upgrade_cost(world, tmp_path, monkeypatch, capsys):
-    def build(wheels, directory, log_path=None):
-        wheels.mkdir(parents=True, exist_ok=True)
-        (wheels / "qtb-0-py3-none-any.whl").write_bytes(b"harness")
-        return wheels / "qtb-0-py3-none-any.whl"
-
-    monkeypatch.setattr("qtb.coordinator.build_harness_wheel", build)
-    backend, session, lsf_dir = exhausted(world, tmp_path, monkeypatch)
-    end_managers(backend)
-    run = read_json(session / "run.json")
-    run["hashes"]["coordinator"] = "old-coordinator"
-    (session / "run.json").write_text(json.dumps(run))
-    assert resume(session, backend) == 41
-    err = capsys.readouterr().err
-    assert "cost is pinned to another harness" in err and "--upgrade-cost" in err
-    assert resume(session, backend, "--upgrade-cost") == 64
-    assert submit.main(["--upgrade-cost", "--reason", "x"], backend=backend, environ={}) == 64
-    assert resume(session, backend, "--baseline", str(tmp_path), "--cost-ncpus", "99") == 64
-    assert "--baseline, --cost-ncpus differ from it" in capsys.readouterr().err
-    launch = read_json(lsf_dir / "launch.json")
-    same = ["--baseline", launch["baseline"], "--evolved", launch["evolved"]]
-    same += ["--store", launch["store"], "--profile", launch["profile"]]
-    same += ["--cost-ncpus", str(launch["cost_selector"]["ncpus"])]
-    assert resume(session, backend, *same, "--upgrade-cost", "--reason", "monitor /2") == 0
-    (amendment,) = read_json(session / "run.json")["amendments"]
-    assert amendment["previous"]["hashes"]["coordinator"] == "old-coordinator"
-    assert set(amendment["session"]) == {"cost_evidence"}
-    assert amendment["reason"] == "monitor /2"
-    assert Ledger.load(lsf_dir / "ledger.json").data["resumes"][0]["amendment"] == 1
-    assert manager(lsf_dir, backend, job_id="901").run() == 0
-    ledger = Ledger.load(lsf_dir / "ledger.json")
-    assert any("Amendment 1" in note for note in ledger.data["decide"]["notes"])
-    assert read_state(session, "cost")["status"] == "complete"
-
-
-def test_a_resume_is_refused_while_the_session_is_busy(world, tmp_path, monkeypatch, capsys):
-    backend, session, lsf_dir = exhausted(world, tmp_path, monkeypatch)
+def test_resume_refuses_busy_session(world, tmp_path, capsys):
+    backend = FakeScheduler()
+    session, lsf_dir = launch(world, tmp_path, backend)
     end_managers(backend)
     with locked(lsf_dir / "orchestration.lock"):
         assert resume(session, backend) == 41
     assert "a manager holds the session" in capsys.readouterr().err
     ledger = Ledger.load(lsf_dir / "ledger.json")
-    ledger.reserve("cost-a99-left", stage="cost", attempt=99, name="qtb-left")
+    ledger.reserve("benchpress-left", stage="benchpress", name="qtb-left")
     assert resume(session, backend) == 41
     assert "lsf.control reap" in capsys.readouterr().err
-    assert resume(tmp_path / "sessions" / "nope", backend) == 41
-    assert Ledger.load(lsf_dir / "ledger.json").epoch == 0

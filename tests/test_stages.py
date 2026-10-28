@@ -17,7 +17,6 @@ from qtb.config import load_profile
 from qtb.coordinator import Comparison, gate, worker_count
 from qtb.coordinator.clean import clean
 from qtb.coordinator.stages import read_state, run_stage, skip_reason
-from qtb.coordinator.storage import read_records
 from qtb.errors import HarnessError, Precondition, Usage
 from qtb.evaluator import record
 from stage_world import QUIET, chain, compile_, status, verdict
@@ -26,17 +25,19 @@ from stage_world import QUIET, chain, compile_, status, verdict
 def test_improving_session_passes_through_every_stage(world):
     root, code = compile_(world)
     assert code == 0
-    assert chain(root) == {"quality": 0, "correctness": 0, "unit-tests": 0, "cost": 0}
+    assert chain(root) == {"quality": 0, "benchpress": 0, "unit-tests": 0}
     assert read_state(root, "quality")["gate"] == "improved"
-    assert skip_reason(root, "cost") is None
+    assert skip_reason(root, "benchpress") is None
     code, decision = verdict(root)
     assert (code, decision["status"]) == (0, "PASS")
     assert "harness/qualification" not in decision["required_ids"]
     assert "IA1/upstream" in decision["required_ids"]
-    assert [row["status"] for row in decision["stages"]] == ["complete"] * 5
-    assert decision["stage_state_hashes"]["cost"] == file_hash(root / "stages/cost/state.json")
+    assert [row["status"] for row in decision["stages"]] == ["complete"] * 4
+    assert decision["stage_state_hashes"]["benchpress"] == file_hash(
+        root / "stages/benchpress/state.json"
+    )
     report = (root / "report.md").read_text()
-    assert "## Stages" in report and "| cost | complete |" in report
+    assert "## Stages" in report and "| benchpress | complete |" in report
     assert "## Quality stage improvement" in report and "## Quality tests" in report
     assert "- Primary D2 improvement: +3.00%. Improvement rule `IA2/improvement`: passed." in report
     assert "- Primary N2 improvement: +3.00%. Guard `IA3/primary/N2`: passed." in report
@@ -51,7 +52,7 @@ def test_improving_session_passes_through_every_stage(world):
     assert "##### quality #####" in log and "Step durations (all stages)" in log
     # Each stage writes only its own evidence; decide merges them.
     merged = {r["id"] for r in read_json(root / "evidence.json")}
-    assert {"harness/roundtrip", "IA1/C7", "IA1/stage-coverage", "IA5/timing"} <= merged
+    assert {"harness/roundtrip", "quality/runtime", "benchpress/completeness"} <= merged
     state = read_state(root, "quality")
     assert state["format"] == "qtb-stage/2" and state["workers"] == worker_count()
     assert state["inputs"]["builds"]["baseline"] and state["machine"]["host"]
@@ -108,16 +109,16 @@ def test_no_improvement_closes_the_gate_and_skips_the_rest(world):
     world.knobs.ratio = 1.0
     world.knobs.candidate_correct = False  # never seen: correctness does not run
     root, _ = compile_(world)
-    assert chain(root) == {"quality": 0, "correctness": 0, "unit-tests": 0, "cost": 0}
-    assert [status(root, s) for s in ("correctness", "unit-tests", "cost")] == ["skipped"] * 3
-    assert "gate closed" in read_state(root, "cost")["reason"]
-    assert skip_reason(root, "cost").startswith("gate closed")
-    assert "correctness" not in world.knobs.calls
+    assert chain(root) == {"quality": 0, "benchpress": 0, "unit-tests": 0}
+    assert status(root, "unit-tests") == "skipped"
+    assert status(root, "benchpress") == "complete"
+    assert "gate closed" in read_state(root, "unit-tests")["reason"]
+    assert skip_reason(root, "unit-tests").startswith("gate closed")
+    assert "benchpress" in world.knobs.calls
     code, decision = verdict(root)
     assert (code, decision["status"]) == (10, "NO_IMPROVEMENT")
     notes = " ".join(decision["notes"])
     assert "not checked" in notes and "Upstream tests: not run" in notes
-    assert "Baseline correctness: not known from the store" in notes
     report = (root / "report.md").read_text()
     assert "- Primary D2 improvement: +0.00%. Improvement rule `IA2/improvement`: failed." in report
 
@@ -127,7 +128,7 @@ def test_quality_failure_closes_the_gate_as_a_violation(world):
     root, _ = compile_(world)
     chain(root)
     assert read_state(root, "quality")["gate"] == "closed"
-    assert status(root, "correctness") == "skipped"
+    assert status(root, "unit-tests") == "skipped"
     assert verdict(root)[1]["status"] == "CONSTRAINT_VIOLATION"
 
 
@@ -137,7 +138,7 @@ def test_unresolved_audit_closes_the_gate_also_on_aa(world, evolved):
     root, _ = compile_(world, evolved=evolved)
     chain(root)
     assert read_state(root, "quality")["gate"] == "closed"
-    assert status(root, "cost") == "skipped"
+    assert status(root, "unit-tests") == "skipped"
     assert verdict(root)[1]["status"] == "INCONCLUSIVE"
 
 
@@ -147,8 +148,8 @@ def test_not_evaluated_quality_check_closes_the_gate(world, evolved):
     root, _ = compile_(world, evolved=evolved)
     chain(root)
     assert read_state(root, "quality")["gate"] == "closed"
-    assert status(root, "correctness") == "skipped"
-    assert status(root, "cost") == "skipped"
+    assert status(root, "unit-tests") == "skipped"
+    assert status(root, "unit-tests") == "skipped"
 
 
 def test_gate_needs_every_non_improvement_record_to_pass():
@@ -188,50 +189,35 @@ def test_aa_session_runs_every_stage(world):
     root, _ = compile_(world, evolved="main")
     chain(root)
     assert read_state(root, "quality")["gate"] == "aa"
-    assert [status(root, s) for s in ("correctness", "unit-tests", "cost")] == ["complete"] * 3
-    assert "measure costs" in world.knobs.calls
+    assert [status(root, s) for s in ("benchpress", "unit-tests")] == ["complete"] * 2
+    assert "runtime" in world.knobs.calls
     assert verdict(root)[1]["status"] == "NO_IMPROVEMENT"
 
 
-def test_correctness_failure_skips_cost(world):
-    world.knobs.candidate_correct = False
-    root, _ = compile_(world)
-    chain(root, ("quality", "correctness"))
-    # What a scheduler can ask before choosing a host for cost.
-    assert skip_reason(root, "cost") == "correctness found a failure"
-    chain(root, ("cost",))
-    assert status(root, "cost") == "skipped"
-    assert read_state(root, "cost")["reason"] == "correctness found a failure"
-    assert "measure costs" not in world.knobs.calls
-    assert verdict(root)[1]["status"] == "CONSTRAINT_VIOLATION"
 
 
-def test_broken_baseline_sets_quality_aside(world):
-    world.knobs.baseline_correct = False
-    root, _ = compile_(world)
-    chain(root)
-    # The evolved revision is never checked against a broken baseline.
-    assert ("behavior", ("evolved",)) not in world.knobs.calls
-    assert status(root, "cost") == "skipped"
-    decision = verdict(root)[1]
-    assert decision["status"] == "INCONCLUSIVE"
-    assert any("set aside" in note for note in decision["notes"])
-    assert not any(r["id"].startswith("IA2/") and r["result"] == "passed"
-                   for r in decision["constraints"])
 
 
 def test_stages_refuse_to_run_before_their_prerequisites(world):
     with pytest.raises(Precondition, match="not a session"):
         run_stage(world.root / "sessions/none", "quality", progress=QUIET)
     root, _ = compile_(world)
-    needs = {"correctness": "quality", "unit-tests": "quality", "cost": "correctness"}
-    for stage, needed in needs.items():
-        with pytest.raises(Precondition, match=f"needs {needed}"):
+    with pytest.raises(Precondition, match="needs quality"):
+        run_stage(root, "unit-tests", progress=QUIET)
+    assert run_stage(root, "benchpress", progress=QUIET) == 0
+    assert status(root, "quality") is None
+    state = read_state(root, "compile")
+    write_json(root / "stages/compile/state.json", dict(state, status="running"))
+    with pytest.raises(Precondition, match="needs compile"):
+        run_stage(root, "quality", progress=QUIET)
+
+
+def test_removed_stages_are_rejected(world):
+    root, _ = compile_(world)
+    for stage in ("correctness", "cost"):
+        with pytest.raises(Usage, match="Unknown stage"):
             run_stage(root, stage, progress=QUIET)
-        assert main([stage, "--results-root", str(root)]) == 41
-    run_stage(root, "quality", progress=QUIET)
-    with pytest.raises(Precondition, match="needs correctness"):
-        run_stage(root, "cost", progress=QUIET)
+
 
 
 def test_decide_with_missing_stages_is_inconclusive_and_names_them(world):
@@ -239,9 +225,9 @@ def test_decide_with_missing_stages_is_inconclusive_and_names_them(world):
     run_stage(root, "quality", progress=QUIET)
     code, decision = verdict(root)
     assert (code, decision["status"]) == (30, "INCONCLUSIVE")
-    assert any("correctness (not started)" in n for n in decision["notes"])
+    assert any("benchpress (not started)" in n for n in decision["notes"])
     rows = {row["stage"]: row for row in decision["stages"]}
-    assert rows["correctness"]["status"] == "not started" and rows["correctness"]["required"]
+    assert rows["benchpress"]["status"] == "not started" and rows["benchpress"]["required"]
 
 
 def test_a_finished_stage_never_runs_again(world, capsys):
@@ -258,20 +244,18 @@ def test_a_finished_stage_never_runs_again(world, capsys):
 def test_a_failed_stage_resumes_and_drops_its_crash_record(world):
     root, _ = compile_(world)
     run_stage(root, "quality", progress=QUIET)
-    world.knobs.fail_once.add("correctness")
-    assert run_stage(root, "correctness", progress=QUIET) == 40
-    assert status(root, "correctness") == "failed"
+    world.knobs.fail_once.add("benchpress")
+    assert run_stage(root, "benchpress", progress=QUIET) == 40
+    assert status(root, "benchpress") == "failed"
     decision = verdict(root)[1]
     assert decision["status"] == "ERROR"
-    assert "harness/error/correctness" in {r["id"] for r in decision["constraints"]}
-    assert run_stage(root, "correctness", progress=QUIET) == 0
-    assert read_state(root, "correctness")["attempts"] == 2
-    evidence = read_json(root / "stages/correctness/evidence.json")
-    assert "harness/error/correctness" not in {r["id"] for r in evidence}
-    # The retry restarted the suites: no duplicated rows.
-    rows = read_records(root / "clifford.jsonl")
-    assert sorted(r["revision"] for r in rows) == ["baseline", "evolved"]
-    chain(root, ("unit-tests", "cost"))
+    assert "harness/error/benchpress" in {r["id"] for r in decision["constraints"]}
+    assert run_stage(root, "benchpress", progress=QUIET) == 0
+    assert read_state(root, "benchpress")["attempts"] == 2
+    evidence = read_json(root / "stages/benchpress/evidence.json")
+    assert "harness/error/benchpress" not in {r["id"] for r in evidence}
+    assert len(evidence) == 1
+    chain(root, ("unit-tests",))
     assert verdict(root)[1]["status"] == "PASS"
 
 
@@ -295,7 +279,7 @@ def test_a_quality_retry_derives_its_records_again(world, monkeypatch):
     assert run_stage(root, "quality", progress=QUIET) == 0
     evidence = read_json(root / "stages/quality/evidence.json")
     assert [r["id"] for r in evidence] == [
-        "audit/determinism", "IA1/C0", "IA1/C6", "IA6/completeness"
+        "audit/determinism", "IA1/C0", "IA1/C6", "IA6/completeness", "quality/runtime"
     ]
     assert read_state(root, "quality")["gate"] == "improved"
 
@@ -420,7 +404,7 @@ def test_store_flag_wins_over_environment(world, monkeypatch, tmp_path):
 def test_optional_unit_tests_count_once_started(world, unit_tests, regression, expected):
     world.knobs.upstream_regression = regression
     root, _ = compile_(world)
-    chain(root, ("quality", "correctness", "cost"))
+    chain(root, ("quality", "benchpress"))
     if unit_tests == "failed":
         world.knobs.fail_once.add("unit-tests")
     if unit_tests in {"complete", "failed"}:
@@ -440,7 +424,7 @@ def test_concurrent_stages_commit_separately_and_decide_ignores_partial_work(wor
     codes = {}
     threads = [
         threading.Thread(target=lambda s=s: codes.__setitem__(s, run_stage(root, s, QUIET)))
-        for s in ("correctness", "unit-tests")
+        for s in ("benchpress", "unit-tests")
     ]
     for thread in threads:
         thread.start()
@@ -452,21 +436,21 @@ def test_concurrent_stages_commit_separately_and_decide_ignores_partial_work(wor
         run_stage(root, "unit-tests", progress=QUIET)
     for thread in threads:
         thread.join()
-    assert codes == {"correctness": 0, "unit-tests": 0}
+    assert codes == {"benchpress": 0, "unit-tests": 0}
     world.knobs.slow = 0
-    run_stage(root, "cost", progress=QUIET)
+    run_stage(root, "benchpress", progress=QUIET)
     decision = verdict(root)[1]
     assert decision["status"] == "PASS"
     ids = {r["id"] for r in decision["constraints"]}
-    assert {"IA1/C7", "IA1/upstream/evolved", "IA1/C1-C5"} <= ids
+    assert {"benchpress/completeness", "IA1/upstream/evolved", "quality/runtime"} <= ids
 
 
 def test_duplicate_record_ids_across_stages_are_a_harness_error(world):
     root, _ = compile_(world)
     chain(root)
-    evidence = read_json(root / "stages/cost/evidence.json")
-    duplicate = record("IA1/C7", "correctness", "passed")
-    write_json(root / "stages/cost/evidence.json", [*evidence, duplicate])
+    evidence = read_json(root / "stages/benchpress/evidence.json")
+    duplicate = record("quality/runtime", "completeness", "passed")
+    write_json(root / "stages/benchpress/evidence.json", [*evidence, duplicate])
     with pytest.raises(HarnessError, match="appears in both"):
         verdict(root)
 
@@ -508,10 +492,13 @@ def test_workers_follow_the_execution_context_not_the_environment(monkeypatch):
 
 def test_clean_needs_a_current_decide_and_is_final(world):
     root, _ = compile_(world)
-    chain(root, ("quality", "correctness", "cost"))
+    chain(root, ("quality", "benchpress"))
     evolved = root / "builds/evolved-build"
     (root / "jobs/j1/scratch").mkdir(parents=True)
     (root / "upstream-baseline/cargo/registry").mkdir(parents=True)
+    (root / "stages/benchpress/env/baseline").mkdir(parents=True)
+    (root / "stages/benchpress/sources/benchpress").mkdir(parents=True)
+    write_json(root / "stages/benchpress/panel.json", [])
     (root / "jobs/j1/job.json").write_text("{}")
     store_before = sorted(str(p) for p in world.store.rglob("*"))
     with pytest.raises(Precondition, match="Run decide"):
@@ -526,11 +513,14 @@ def test_clean_needs_a_current_decide_and_is_final(world):
     assert not evolved.exists() and not (root / "verifier").exists()
     assert not (root / "jobs").exists()
     assert not (root / "upstream-baseline/cargo").exists()
+    assert not (root / "stages/benchpress/env").exists()
+    assert not (root / "stages/benchpress/sources").exists()
+    assert (root / "stages/benchpress/panel.json").exists()
     record_ = read_json(root / "clean.json")
     assert record_["status"] == "complete"
     assert str(evolved) in record_["planned"]
     assert sorted(str(p) for p in world.store.rglob("*")) == store_before
-    for stage in ("quality", "correctness", "unit-tests", "cost"):
+    for stage in ("quality", "benchpress", "unit-tests"):
         assert main([stage, "--results-root", str(root)]) == 41
     again = verdict(root)[1]
     assert again["status"] == first["status"] == "PASS"
@@ -562,8 +552,8 @@ def test_clean_is_refused_while_a_stage_is_running(world):
     root, _ = compile_(world)
     chain(root)
     verdict(root)
-    state = read_state(root, "cost")
-    write_json(root / "stages/cost/state.json", dict(state, status="running"))
+    state = read_state(root, "benchpress")
+    write_json(root / "stages/benchpress/state.json", dict(state, status="running"))
     with pytest.raises(Precondition, match="did not finish"):
         clean(root, progress=QUIET)
 
@@ -571,69 +561,24 @@ def test_clean_is_refused_while_a_stage_is_running(world):
 def test_second_session_reuses_the_stored_baseline(world):
     first, _ = compile_(world)
     chain(first)
-    assert world.knobs.calls.count("baseline build") == 1
-    stored = list((world.store / "correctness").iterdir())
-    assert len(stored) == 1
-    entry_evidence = read_json(stored[0] / "evidence.json")
-    assert {r["id"] for r in entry_evidence} == {
-        "IA1/C1-C5/baseline", "baseline/preflight"
-    }
-    # No evolved data goes into the store.
-    for path in world.store.rglob("*.json*"):
-        text = path.read_text()
-        assert '"evolved"' not in text and "IA1/C7" not in text, path
-
     second, _ = compile_(world, name="s2", evolved="idea2")
+    chain(second)
     assert world.knobs.calls.count("baseline build") == 1
     assert read_state(second, "compile")["reused"]["baseline_build"]
-    world.knobs.calls.clear()
-    chain(second)
-    assert ("behavior", ("baseline",)) not in world.knobs.calls
-    assert ("behavior", ("evolved",)) in world.knobs.calls
-    rows = read_records(second / "correctness.jsonl")
-    assert [r.get("cached_from") is not None for r in rows] == [True, False]
-    evidence = read_json(second / "stages/correctness/evidence.json")
-    assert next(r for r in evidence if r["id"] == "baseline/preflight")["cached_from"]
-    decision = verdict(second)[1]
-    assert decision["status"] == "PASS"
-    assert any("baseline correctness: from the store" in n for n in decision["notes"])
-
-    # Cleaning the first session leaves the second one's stored baseline intact.
+    assert world.knobs.calls.count("runtime") == 2
+    assert world.knobs.calls.count("benchpress") == 2
     verdict(first)
     clean(first, progress=QUIET)
     key = read_json(second / "run.json")["builds"]["baseline"]["store_key"]
     assert (world.store / "builds" / key / "READY").exists()
+    assert verdict(second)[1]["status"] == "PASS"
 
 
-def test_an_indecisive_baseline_correctness_result_is_never_stored(world):
-    world.knobs.decisive = False
-    root, _ = compile_(world)
-    chain(root)
-    assert status(root, "correctness") == "complete"
-    assert not (world.store / "correctness").exists()
 
 
-def test_aa_bypasses_stored_baseline_results(world):
-    first, _ = compile_(world)
-    chain(first)
-    world.knobs.calls.clear()
-    aa, _ = compile_(world, name="aa", evolved="main")
-    chain(aa)
-    assert ("behavior", ("baseline",)) in world.knobs.calls
-    rows = read_records(aa / "correctness.jsonl")
-    assert not any(r.get("cached_from") for r in rows)
 
 
-def test_a_broken_baseline_is_reported_by_later_gate_closed_sessions(world):
-    world.knobs.baseline_correct = False
-    first, _ = compile_(world)
-    chain(first)
-    world.knobs.ratio = 1.0
-    second, _ = compile_(world, name="s2", evolved="idea2")
-    chain(second)
-    decision = verdict(second)[1]
-    assert decision["status"] == "NO_IMPROVEMENT"
-    assert any("The baseline is broken" in note for note in decision["notes"])
+
 
 
 def test_a_missing_store_entry_stops_later_stages(world):
@@ -654,7 +599,7 @@ def test_version_five_policies_need_no_qualification():
     for profile in ("iterations-profile", "confirm-profile"):
         manifest, policy, _ = load_profile(profile, verify=False)
         assert policy["version"] == manifest["version"] == (
-            13 if profile == "confirm-profile" else 10
+            14 if profile == "confirm-profile" else 11
         )
         assert "harness/qualification" not in policy["required_ids"]
         assert not any(i.endswith("1/upstream") for i in policy["required_ids"])

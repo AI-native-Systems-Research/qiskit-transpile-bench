@@ -50,6 +50,87 @@ def _quality_comparison(manifest, observations):
     return {"cases": cases}
 
 
+def _runtime_comparison(manifest, observations):
+    """Fresh full-panel runtime differences; incomplete pairs never become zeroes."""
+    if manifest is None:
+        return {"status": "unavailable", "cases": [], "reason": "Archived manifest missing"}
+    rows = {
+        (row["case_id"], row["revision"], row["seed"]): row
+        for row in observations
+        if row.get("seed_block") == "B0" and row.get("mode") == "quality"
+    }
+    results, totals = [], {"baseline": 0.0, "evolved": 0.0}
+    missing_samples = failed_samples = expected_pairs = measured_pairs = 0
+    for case in manifest["cases"]:
+        if case["role"] in {"timing", "memory"}:
+            continue
+        count = case["seeds_per_block"]
+        expected_pairs += count
+        values = {"baseline": [], "evolved": []}
+        missing = failed = paired = 0
+        for seed in range(count):
+            valid = []
+            for revision in ("baseline", "evolved"):
+                row = rows.get((case["case_id"], revision, seed), {})
+                value = row.get("runtime_ns")
+                good = (
+                    isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(value) and value > 0
+                    and row.get("runtime_measurement", {}).get("status", "ok") == "ok"
+                )
+                valid.append(good)
+                if good:
+                    values[revision].append(value / 1e9)
+                elif "runtime_measurement" in row or "runtime_ns" in row:
+                    failed += 1
+                else:
+                    missing += 1
+            paired += all(valid)
+        missing_samples += missing
+        failed_samples += failed
+        measured_pairs += paired
+        result = {
+            "case_id": case["case_id"], "seed_count": count, "measured_pairs": paired,
+            "missing_samples": missing, "failed_samples": failed,
+            "status": "reported" if paired == count else "unavailable",
+            "baseline_seconds": None, "evolved_seconds": None,
+            "difference_seconds": None, "ratio": None, "improvement_percent": None,
+        }
+        if paired == count:
+            baseline, evolved = (fmean(values[revision]) for revision in ("baseline", "evolved"))
+            result.update(
+                baseline_seconds=baseline, evolved_seconds=evolved,
+                difference_seconds=evolved - baseline, ratio=evolved / baseline,
+                improvement_percent=100 * (baseline - evolved) / baseline,
+            )
+            for revision in totals:
+                totals[revision] += sum(values[revision])
+        results.append(result)
+    complete = bool(results) and not missing_samples and not failed_samples
+    summary = {
+        "status": "reported" if complete else "unavailable", "cases": results,
+        "expected_pairs": expected_pairs, "measured_pairs": measured_pairs,
+        "missing_samples": missing_samples, "failed_samples": failed_samples,
+        "case_count": len(results),
+        "complete_cases": sum(case["status"] == "reported" for case in results),
+        "baseline_seconds": None, "evolved_seconds": None, "difference_seconds": None,
+        "ratio": None, "improvement_percent": None, "case_geomean_ratio": None,
+    }
+    if complete:
+        baseline, evolved = totals["baseline"], totals["evolved"]
+        summary.update(
+            baseline_seconds=baseline, evolved_seconds=evolved,
+            difference_seconds=evolved - baseline, ratio=evolved / baseline,
+            improvement_percent=100 * (baseline - evolved) / baseline,
+            case_geomean_ratio=math.exp(fmean(math.log(case["ratio"]) for case in results)),
+        )
+    else:
+        summary["reason"] = (
+            "Incomplete paired runtime measurements" if results else "No quality cases"
+        )
+    return summary
+
+
 def _zero_baseline_deltas(manifest, observations):
     if manifest is None:
         return {
@@ -164,11 +245,11 @@ def make_decision(
         "objective": objective,
         "trade_score": trade_score,
         "quality_comparison": _quality_comparison(manifest, observations),
+        "runtime_comparison": _runtime_comparison(manifest, observations),
         "zero_baseline_deltas": _zero_baseline_deltas(manifest, observations),
         "summaries": summaries,
         "scope": run.get("scope", {}),
         "measurement_timestamp": run.get("created_at"),
-        "cost_thresholds": (policy or {}).get("cost_thresholds"),
         "fingerprint_changes": {
             case: pair
             for case, pair in sorted(fingerprints.items())
@@ -257,6 +338,53 @@ def _render_quality_comparison(decision):
     return lines + [""]
 
 
+def _render_runtime_comparison(decision):
+    comparison = decision.get("runtime_comparison", {})
+    lines = [
+        "## Quality runtime", "",
+        "Fresh sequential timing runs cover the same quality cases and B0 seeds on both builds. "
+        "Each worker warms up once before timing uninstrumented transpile calls; imports, "
+        "fixture loading, export and checks are excluded. Machine load is neither checked "
+        "nor corrected. Stored baseline quality results do not supply runtime samples.", "",
+        "Runtime differences are evolved − baseline; negative differences mean faster. "
+        "Improvement is 100 × (baseline − evolved) / baseline. Runtime regressions are "
+        "reported without an acceptance threshold.", "",
+    ]
+    if comparison.get("status") == "reported":
+        lines += [
+            f"Full-panel measured runtime ({comparison['expected_pairs']} seeds per revision): "
+            f"baseline **{comparison['baseline_seconds']:.6f} s**, "
+            f"evolved **{comparison['evolved_seconds']:.6f} s**; "
+            f"difference **{comparison['difference_seconds']:+.6f} s** "
+            f"({comparison['improvement_percent']:+.2f}% improvement).", "",
+            f"Equal-case geometric mean runtime ratio: "
+            f"{comparison['case_geomean_ratio']:.6f}×.", "",
+        ]
+    else:
+        lines += [
+            "Full-panel runtime unavailable: "
+            + comparison.get("reason", "No runtime measurements") + ".", "",
+        ]
+    lines += [
+        f"Paired seeds: {comparison.get('measured_pairs', 0)} / "
+        f"{comparison.get('expected_pairs', 0)}; "
+        f"missing samples: {comparison.get('missing_samples', 0)}; "
+        f"failed samples: {comparison.get('failed_samples', 0)}.", "",
+        "Per-case times are arithmetic means over the complete frozen seed block.", "",
+        "| Test | Seeds | Baseline (s) | Evolved (s) | Difference (s) | Runtime improvement |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for case in comparison.get("cases", []):
+        cells = [case["case_id"], str(case["seed_count"])]
+        if case["status"] == "reported":
+            cells += [f"{case['baseline_seconds']:.6f}", f"{case['evolved_seconds']:.6f}",
+                      f"{case['difference_seconds']:+.6f}", f"{case['improvement_percent']:+.2f}%"]
+        else:
+            cells += ["unavailable"] * 4
+        lines.append("| " + " | ".join(cells) + " |")
+    return lines + [""]
+
+
 def _render_quality_results(decision):
     lines = ["## Quality stage improvement", ""]
     if decision.get("objective"):
@@ -278,6 +406,7 @@ def _render_quality_results(decision):
         "",
     ]
     lines += _render_quality_comparison(decision)
+    lines += _render_runtime_comparison(decision)
     lines += [
         "## Quality estimates",
         "",
@@ -407,16 +536,6 @@ def render_report(decision):
         "This verdict concerns the fixed workload and its declared semantic contracts.",
         "",
     ]
-    fixed = decision.get("cost_thresholds")
-    if fixed:
-        lines += [
-            "Cost thresholds are fixed by policy, not calibrated on this machine: "
-            f"panel ≤ {fixed['panel_ratio']:.2f}×, a case counts only above "
-            f"{fixed['case_ratio']:.2f}× and {fixed['case_floor_ns'] / 1e6:.0f} ms "
-            f"({fixed['case_floor_bytes'] / 2**20:.0f} MiB for memory); the screen must "
-            f"clear {fixed['screen_fraction']:.0%} of the panel band.",
-            "",
-        ]
     if decision["reasons"] or decision["missing_records"]:
         lines += ["## Constraints needing attention", ""]
         for reason in decision["reasons"]:
@@ -425,22 +544,6 @@ def render_report(decision):
             lines.append(f"- **missing** `{missing}`")
         lines.append("")
     lines += _render_quality_results(decision)
-    lines += [
-        "",
-        "## Compilation cost",
-        "",
-        "| Panel | Result | Regime | Candidate log ratio |",
-        "| --- | --- | --- | ---: |",
-    ]
-    for row in decision["constraints"]:
-        if row["kind"] == "cost" and "candidate" in row:
-            regime = row.get("regime", "normal")
-            if "count" in row:
-                regime += f" ({row['count']} rounds)"
-            lines.append(
-                f"| {row['id']} | {row['result']} | {regime} | "
-                f"{row['candidate']['ln_panel']:.6f} |"
-            )
     for report in decision.get("test_reports", {}).values():
         lines += [""] + render_stage_details(report)
     coverage_required = any(id_.endswith("/stage-coverage") for id_ in decision["required_ids"])
@@ -453,7 +556,7 @@ def render_report(decision):
             "on every scored case."
             if coverage_required else
             "Stage coverage is report-only: uncovered scored cases do not block acceptance. "
-            "A pass requires the correctness test suite; it does not establish semantic "
+            "Quality checks do not establish semantic "
             "coverage of every scored circuit."
         ),
         "Routing replay covers layout and routing; substituted synthesis does not "
@@ -569,7 +672,8 @@ def write_quality_report(
         "constraint_counts": dict(sorted(Counter(row["result"] for row in records).items())),
         **{key: decision[key] for key in (
             "profile", "run_id", "hashes", "identities", "seed_block", "measurement_timestamp",
-            "objective", "trade_score", "quality_comparison", "zero_baseline_deltas",
+            "objective", "trade_score", "quality_comparison", "runtime_comparison",
+            "zero_baseline_deltas",
             "summaries", "constraints", "required_ids", "reasons", "missing_records",
         )},
     }
@@ -577,7 +681,7 @@ def write_quality_report(
         f"# Quality report — {run['profile']}", "",
         f"Gate: **{gate}** — {gate_reason}", "",
         f"Quality checks: **{report['quality_status']}**. This is a quality-stage snapshot; "
-        "run `decide` for the final benchmark verdict, including correctness and cost.", "",
+        "run `decide` for the final benchmark verdict, including Benchpress.", "",
         f"Per-case quality cap: {policy['quality_cap']:.2f}× "
         f"(seed-aggregated; rule: {report['quality_cap_rule']}).", "",
         "Quality guard tolerances: "

@@ -130,8 +130,7 @@ def test_snapshot_preserves_nested_target_source(tmp_path, git):
 
 
 def test_worker_roundtrip_and_compile(tmp_path):
-    manifest, _, _ = load_profile("iterations-profile")
-    case = next(c for c in manifest["cases"] if c["case_id"] == "T1")
+    case = _c1_n3_case()
     job = dict(
         mode="roundtrip",
         case=case,
@@ -152,9 +151,15 @@ def test_worker_roundtrip_and_compile(tmp_path):
 def test_worker_times_a_whole_panel_in_one_process(tmp_path):
     from qtb.coordinator.costs import timing_batch_job
 
-    manifest, policy, _ = load_profile("iterations-profile")
-    cases = [c for c in manifest["cases"] if c["case_id"] in {"T1", "T2", "preset/cz"}]
-    job = timing_batch_job(cases, data_root() / "fixtures", policy["measurement_protocol"])
+    # Explicit legacy timing panel keeps the low-level worker protocol covered.
+    case = _c1_n3_case()
+    cases = [
+        dict(case, case_id="T1", modes=["timing_e2e"], timing={"fixed_seed": 20220125}),
+        dict(case, case_id="T2", modes=["timing_e2e"], timing={"fixed_seed": 20220125}),
+        dict(case, case_id="preset/cz", modes=["preset_build"]),
+    ]
+    protocol = {"warmups": 1, "minimum_calls": 2, "minimum_ns": 0}
+    job = timing_batch_job(cases, data_root() / "fixtures", protocol)
     job["minimum_ns"] = 0
     rows = run_worker(local_build(), job, tmp_path / "batch")
     assert [row["status"] for row in rows] == ["ok"] * 3, rows
@@ -167,8 +172,7 @@ def test_worker_times_a_whole_panel_in_one_process(tmp_path):
 
 @pytest.mark.parametrize("failure", ["timeout", "exit"])
 def test_worker_batch_records_every_seed_after_interruption(tmp_path, failure):
-    manifest, _, _ = load_profile("iterations-profile")
-    case = next(c for c in manifest["cases"] if c["case_id"] == "T1")
+    case = _c1_n3_case()
     fake_python = tmp_path / "fake-worker"
     failure_action = (
         "time.sleep(8)"
@@ -213,8 +217,7 @@ def test_worker_batch_records_every_seed_after_interruption(tmp_path, failure):
 
 
 def test_interrupted_seed_that_finishes_on_retry_keeps_its_result(tmp_path):
-    manifest, _, _ = load_profile("iterations-profile")
-    case = next(c for c in manifest["cases"] if c["case_id"] == "T1")
+    case = _c1_n3_case()
     marker = tmp_path / "slow-once"
     fake_python = tmp_path / "fake-worker"
     fake_python.write_text(
@@ -561,8 +564,8 @@ def _quality_comparison(tmp_path, policy, builds):
 
 
 def test_unattempted_quality_seed_is_unresolved(tmp_path):
-    manifest, policy, _ = load_profile("iterations-profile")
-    case = dict(next(c for c in manifest["cases"] if c["case_id"] == "T1"))
+    _, policy, _ = load_profile("iterations-profile")
+    case = dict(_c1_n3_case())
     case["seeds_per_block"] = 2
     comparison = _quality_comparison(tmp_path, policy, {"evolved": {"id": "build"}})
     comparison.job = lambda *_args, **_kwargs: [
@@ -602,8 +605,8 @@ def _timeout_row(seed, timeouts, load=0.1):
 def test_candidate_timeouts_fail_only_when_repeated_with_baseline_margin(
     tmp_path, timeouts, baseline_ns, load, rule, expected
 ):
-    manifest, policy, _ = load_profile("iterations-profile")
-    case = dict(next(c for c in manifest["cases"] if c["case_id"] == "T1"))
+    _, policy, _ = load_profile("iterations-profile")
+    case = dict(_c1_n3_case())
     case["seeds_per_block"] = 1
     policy = dict(policy, measurement_protocol=dict(policy["measurement_protocol"]))
     policy["measurement_protocol"].pop("quality_timeout", None)

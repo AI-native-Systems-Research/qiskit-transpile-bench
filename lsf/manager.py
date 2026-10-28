@@ -1,29 +1,8 @@
-"""The manager job: one session's whole pipeline on LSF. ``python -P -m lsf.manager``.
+"""Run a session on LSF: compile, quality, Benchpress, optional tests, decide and clean.
 
-The launcher submits it once per launch or resume, with 16 slots. It holds the session's
-orchestration lock for its lifetime and never runs a stage body itself::
-
-    compile -> quality -> correctness + unit-tests (in parallel) -> cost (noise retries)
-            -> decide (inline) -> clean (its own job, when the session is safe to clean)
-
-Each stage is its own job with its configured allocation; a stage whose gate is closed runs
-and records ``skipped`` itself. A stage already ``complete`` or ``skipped`` is not
-submitted again, and a stage job that already ended is never resubmitted: only a cost job
-that ended ``noisy`` leads to another cost job, within the ledger's budget (``lsf.retry``),
-which avoids the hosts that were noisy before.
-
-A stage outcome is trusted only when the scheduler's terminal state, the job's outcome
-record and the committed stage state agree on the invocation. Pending time counts toward
-the manager's internal deadline, which ends before its wall limit; a job that cannot fit
-the remaining time is not submitted. On a termination signal or at the deadline the
-manager cancels the jobs it owns, after checking their ID, name and user, and waits for
-confirmation. After a kill it cannot trap, ``python -m lsf.control reap`` does the same.
-
-If the manager is requeued, the new instance reconciles the ledger first: it adopts jobs
-that are still active and settles those that ended. The exit status is the verdict's.
-
-"Already ended" is per epoch (``lsf.retry``): after ``lsf/submit.py --resume`` every
-unfinished stage may run one new job and cost has a fresh retry budget.
+Quality and Benchpress jobs run sequentially so their runtime measurements do not compete.
+The durable ledger reconciles each invocation with its scheduler and stage outcome.
+Finished stages never run again; a resume permits one new job for unfinished stages.
 """
 
 import argparse
@@ -181,10 +160,7 @@ class Manager:
             + (f" (resume {self.ledger.epoch})" if self.ledger.epoch else ""),
             epoch=self.ledger.epoch,
             resources=resources,
-            cost_selector=self.launch["cost_selector"],
-            tier=self.launch["tier"],
             unit_tests=self.launch["unit_tests"],
-            retry_budget={"retries": retry.MAX_COST_RETRIES, "jobs": retry.MAX_COST_ATTEMPTS},
             deadline_at=wall_deadline.isoformat(),
             measurement_identity=self.launch.get("measurement_identity"),
             implementation_identity=implementation_identity(),
@@ -266,11 +242,10 @@ class Manager:
                 return EXIT_ERROR
             if self.final("compile"):
                 self.stage_jobs(["quality"])
-            if self.final("quality"):
-                parallel = ["correctness"] + (["unit-tests"] if self.launch["unit_tests"] else [])
-                self.stage_jobs(parallel)
-            if self.final("correctness"):
-                self.cost_loop()
+            if self.final("compile"):
+                self.stage_jobs(["benchpress"])
+            if self.final("quality") and self.launch["unit_tests"]:
+                self.stage_jobs(["unit-tests"])
         except DeadlineReached as exc:
             self.stop_reason = str(exc)
             log.warning("deadline.reached", str(exc), remaining_s=self.remaining())
@@ -307,30 +282,6 @@ class Manager:
         self.wait([key for key in keys if key])
         if any(e["status"] == "unreconciled" for e in self.owned()):
             raise HarnessError("child termination is unconfirmed; run lsf.control reap")
-
-    def cost_loop(self):
-        while True:
-            latest = self.ledger.latest("cost")
-            if latest and latest["status"] in ACTIVE:
-                self.wait([latest["key"]])
-                continue
-            state = self.state("cost")
-            if state and state["status"] in FINAL:
-                log.event("cost.final", f"cost is {state['status']}", stage="cost")
-                return
-            decision = retry.decision(self.ledger)
-            log.event("retry.decision", decision["reason"], stage="cost", **decision)
-            if not decision["allowed"]:
-                if decision["exhausted"]:
-                    retry.record_exhaustion(self.ledger, decision["reason"])
-                else:
-                    retry.record_stop(self.ledger, decision["reason"])
-                return
-            key = self.submit("cost", attempt=decision["next_attempt"])
-            if key is None:
-                retry.record_stop(self.ledger, self.stop_reason)
-                return
-            self.wait([key])
 
     def decide(self):
         from qtb.coordinator.clean import after_decide
@@ -425,7 +376,6 @@ class Manager:
             mem_gb=resources["mem_gb"],
             wall=resources["wall"],
             output=str(self.log_dir / "jobs" / f"{key}.%J.out"),
-            selector=self.launch["cost_selector"] if stage == "cost" else {},
             exclude_hosts=tuple(exclude_hosts),
         )
 
@@ -433,16 +383,7 @@ class Manager:
         """Reserve, then submit; returns the job key, or ``None`` when nothing was accepted."""
         nonce = uuid.uuid4().hex[:8]
         key = f"{stage}-a{attempt:02d}-{nonce}" if attempt else f"{stage}-{nonce}"
-        exclude_hosts = retry.excluded_hosts(self.ledger) if stage == "cost" else []
-        if exclude_hosts:
-            log.event(
-                "retry.exclude_hosts",
-                f"{stage} attempt {attempt} avoids {', '.join(exclude_hosts)}",
-                stage=stage,
-                attempt=attempt,
-                hosts=exclude_hosts,
-            )
-        spec = self.spec(stage, key, attempt, exclude_hosts)
+        spec = self.spec(stage, key, attempt)
         needed = wall_seconds(spec.wall)
         if self.remaining() < needed:
             self.stop_reason = (

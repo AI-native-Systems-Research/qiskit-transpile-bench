@@ -1,8 +1,8 @@
 """The companion orchestration report: ``<session>.lsf/report.md`` and ``report.json``.
 
 It is produced from the ledger alone and lives outside the session, so it survives the
-session's cleanup. It links every job and cost attempt to its logs and evidence, shows the
-retry budget of the current epoch, every resume, and says why the pipeline stopped. The
+session's cleanup. It links every job to its logs and evidence, shows every resume,
+and says why the pipeline stopped. The
 verdict itself is in the session's ``report.md`` and ``decision.json``.
 """
 
@@ -10,10 +10,8 @@ from datetime import UTC, datetime
 
 from qtb.canonical import atomic_bytes, write_json
 
-from lsf import retry
-
 FORMAT = "qtb-lsf-report/1"
-ORDER = ("compile", "quality", "correctness", "unit-tests", "cost", "clean")
+ORDER = ("compile", "quality", "benchpress", "unit-tests", "clean")
 
 
 def _job(entry):
@@ -56,9 +54,11 @@ def build(manager):
     data = ledger.data
     jobs = sorted(
         (_job(e) for e in ledger.jobs() if e["stage"] != "manager"),
-        key=lambda j: (j["epoch"], ORDER.index(j["stage"]), j["attempt"] or 0, j["key"]),
+        key=lambda j: (
+            j["epoch"], ORDER.index(j["stage"]) if j["stage"] in ORDER else len(ORDER),
+            j["attempt"] or 0, j["key"],
+        ),
     )
-    decision = retry.decision(ledger)
     return {
         "format": FORMAT,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -69,14 +69,6 @@ def build(manager):
         "epoch": ledger.epoch,
         "resumes": data.get("resumes") or [],
         "jobs": jobs,
-        "cost": {
-            "attempts": [j for j in jobs if j["stage"] == "cost" and j["epoch"] == ledger.epoch],
-            "used": decision["used"],
-            "limit": decision["limit"],
-            "remaining": decision["remaining"],
-            "exhausted": data["cost"].get("exhausted"),
-            "stopped": data["cost"].get("stopped"),
-        },
         "decide": data.get("decide"),
         "cleanup": data.get("cleanup"),
         "result": data.get("result"),
@@ -115,14 +107,10 @@ def render(content):
     ]
     for resume in content.get("resumes") or []:
         before = resume["previous"]
-        epoch = resume["index"] - 1
-        used = sum(1 for j in content["jobs"] if j["stage"] == "cost" and j["epoch"] == epoch)
         lines.append(
             f"- Resume {resume['index']} ({resume['at'][:19]}, {resume['user']}): "
             f"{', '.join(resume['pending']) or 'no stage'} unfinished; the earlier epoch ended "
-            f"{(before.get('decide') or {}).get('status', 'undecided')} after "
-            f"{used} cost jobs"
-            + (f"; cost re-pinned (amendment {resume['amendment']})" if resume["amendment"] else "")
+            f"{(before.get('decide') or {}).get('status', 'undecided')}"
         )
     lines += [
         "",
@@ -151,48 +139,6 @@ def render(content):
             )
             + " |"
         )
-    cost = content["cost"]
-    lines += [
-        "",
-        "## Cost attempts" + (f" (epoch {content['epoch']})" if content.get("epoch") else ""),
-        "",
-        f"{cost['used']} of {cost['limit']} cost jobs used (one initial job and up to "
-        f"{cost['limit'] - 1} noise retries); {cost['remaining']} remain.",
-        "",
-    ]
-    if cost.get("exhausted"):
-        lines += [
-            f"**Retry budget exhausted:** {cost['exhausted']['reason']}. No clean cost "
-            "measurement exists; this is not an observed cost regression.",
-            "",
-        ]
-    elif cost.get("stopped"):
-        lines += [f"Cost retries stopped: {cost['stopped']['reason']}.", ""]
-    if cost["attempts"]:
-        lines += [
-            "| Attempt | Job | Outcome | Host | CPU | Phase | Foreign CPU | Evidence |",
-            "| ---: | --- | --- | --- | --- | --- | ---: | --- |",
-        ]
-        for job in cost["attempts"]:
-            fraction = job["foreign_fraction"]
-            lines.append(
-                "| "
-                + " | ".join(
-                    _cell(v)
-                    for v in (
-                        job["attempt"],
-                        job["job_id"],
-                        job["outcome"],
-                        job["host"],
-                        job["cpu"],
-                        job["phase"],
-                        f"{fraction:.1%}" if fraction is not None else None,
-                        job["evidence"] or job["preflight"] or (job["logs"] or {}).get("log"),
-                    )
-                )
-                + " |"
-            )
-        lines.append("")
     lines += ["## Manager invocations", ""]
     for manager in content["managers"]:
         lines.append(

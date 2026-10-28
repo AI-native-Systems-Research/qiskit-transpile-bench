@@ -187,7 +187,10 @@ def run_seed(job, seed, outdir, inputs):
                 return preset(case, target, seed)
             return transpile(circuit, **compile_options(case, target, seed))
 
-        for _ in range(job.get("warmups", 1)):
+        warmups = job.get("warmups", 1)
+        if job.get("warmups_once") and seed != job["seeds"][0]:
+            warmups = 0
+        for _ in range(warmups):
             call()
         samples, elapsed = [], 0
         with measured():

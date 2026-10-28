@@ -7,7 +7,6 @@ as permitted by implementation-plan section 3.8.
 """
 
 import argparse
-import copy
 import importlib.util
 import json
 import random
@@ -147,39 +146,33 @@ def policy(profile, cases=(), catalog=()):
     prefix = "CA" if profile == "confirm-profile" else "IA"
     required = [
         "harness/roundtrip",
-        "baseline/preflight",
         "audit/determinism",
         f"{prefix}1/C0",
-        f"{prefix}1/C1-C5",
         f"{prefix}1/C6",
-        f"{prefix}1/C7",
-        f"{prefix}1/stage-coverage",
         f"{prefix}2/improvement",
-        f"{prefix}5/timing",
+        "quality/runtime",
+        "benchpress/completeness",
         f"{prefix}6/completeness",
     ]
     if prefix == "CA":
-        required.remove("CA1/stage-coverage")
-        required += ["CA3/breadth", "CA5/confirm-timing", "CA5/memory"]
+        required += ["CA3/breadth"]
     confirm = prefix == "CA"
     extra_protocol = {}
     if confirm:
         extra_protocol = dict(
             quality_batch_schedule=quality_batch_schedule(cases, catalog),
-            companion_groups=COMPANION_GROUPS,
         )
     return dict(
         format="qtb-policy/1",
         profile=profile,
-        version=7,
-        # C7: seeds per variant and mode, and whether full-pipeline outputs are checked too.
-        clifford_seeds=5 if confirm else 3,
-        clifford_full_mode=confirm,
+        version=14 if confirm else 11,
         quality_cap_rule="plain",
         required_ids=required,
         quality_prerequisites=["harness/roundtrip", "audit/determinism"],
         practical_ratio=0.99 if prefix == "CA" else 1.0,
-        quality_cap=1.05,
+        quality_cap=2.0,
+        **({"quality_guard_tolerances": {"aggregate": 0.05, "individual": 0.15,
+                                         "deterministic": 0.25}} if confirm else {}),
         improvement_multiplier=2.0,
         guard_multiplier=3.0,
         rng_seed=20260924,
@@ -187,33 +180,14 @@ def policy(profile, cases=(), catalog=()):
         iterations_groups=ITERATIONS,
         measurement_protocol=dict(
             quality_batch_size=25,
-            # Timing: a 4-round screen ends a clearly clean panel early; the full
-            # count is 6 rounds in the iterations loop and 10 in confirm.
-            screen_rounds=4,
-            timing_rounds=10 if prefix == "CA" else 6,
             warmups=1,
-            minimum_calls=2,
-            minimum_ns=1000000000,
-            companion_seeds=list(range(10 if confirm else 20)),
-            companion_rounds=3,
-            memory_processes=3 if confirm else 5,
-            rerun_multiplier=2,
             audit_fraction=0.05,
             audit_minimum=10,
             output_retention_bytes=8 * 1024 * 1024,
             # A candidate timeout fails only when repeated, with the baseline seed well
-            # inside the timeout and a quiet host; otherwise it is unresolved.
-            quality_timeout=dict(baseline_fraction=0.5, max_load_per_cpu=1.0),
+            # inside the timeout; otherwise it is unresolved.
+            quality_timeout=dict(baseline_fraction=0.5),
             **extra_protocol,
-        ),
-        # Fixed cost guards; there is no per-machine calibration. See
-        # design/remove-calibration-plan.md for how to sanity-check them on a runner.
-        cost_thresholds=dict(
-            panel_ratio=1.10,
-            case_ratio=1.20,
-            case_floor_ns=25_000_000,
-            case_floor_bytes=32 * 1024 * 1024,
-            screen_fraction=0.5,
         ),
         tolerances=dict(operator_rtol=1e-7, operator_atol=1e-8, state_atol=1e-8),
         upstream_test_budgets_s=dict(python=14400, rust=10800),
@@ -440,92 +414,9 @@ def curate(source, root=ROOT):
     for name, levels in [("su2_circular_n100", [2]), ("long_2q_sequence", [2, 3])]:
         row = next(r for r in catalog if r["input_group"] == name)
         iteration.extend(make_case(row, level, "canary", "iterations") for level in levels)
-    timing = []
-
-    def timed(case, id_, seed, mode="timing_e2e", panel="timing"):
-        return dict(
-            copy.deepcopy(case),
-            case_id=id_,
-            role="timing",
-            panel=panel,
-            weight=0.0,
-            modes=[mode],
-            timing={"fixed_seed": seed},
-            seeds_per_block=1,
-        )
-
-    template = next(c for c in confirm if c["input_group"] == "qaoa_complete_n8")
-    for i, name in enumerate(("single_h", "cancel_2q"), 1):
-        c = dict(
-            template,
-            input_group=name,
-            circuit=artifacts[name],
-            logical_qubits=i,
-            active_qubits=i,
-            optimization_level=None,
-            target=targets["mumbai_27_loose"],
-            semantic_reference={"kind": "input"},
-            family="timing_microbenchmark",
-            provenance={
-                "commit": "0131cbbcc",
-                "grade": "A",
-                "source": "test/benchmarks/transpiler_benchmarks.py",
-            },
-            **recipes["mumbai_27_loose"],
-        )
-        timing.append(timed(c, f"T{i}", 20220125))
-    for name in ("qv_n14_d14", "long_2q_sequence"):
-        template = next(c for c in confirm if c["input_group"] == name)
-        for level in range(4):
-            timing.append(timed(dict(template, optimization_level=level), f"T{len(timing) + 1}", 0))
-    for case in iteration[:9]:
-        # The cx/ecr twins share the cz case's layout and routing; they are timed
-        # only when the change can reach translation or optimization.
-        panel = "timing" if case["native_basis"] == "cz" else "timing-basis"
-        timing.append(timed(case, f"T{len(timing) + 1}", 1234567845, "timing_reuse", panel))
-    for basis in ("cx", "cz", "ecr"):
-        case = next(c for c in iteration if c["native_basis"] == basis)
-        timing.append(timed(case, "preset/" + basis, 0, "preset_build", "preset"))
     for profile, cases in [("iterations-profile", iteration), ("confirm-profile", confirm)]:
-        cases.extend(copy.deepcopy(timing))
         if profile == "confirm-profile":
-            heavy = [
-                "qft_n100",
-                "square_heisenberg_n100",
-                "qaoa_ba_n100_3reps",
-                "qv_n50_d50",
-                "multiplier_h18_n32",
-                "bv_all_ones_n100",
-                "queko_bss_53",
-                "su2_circular_n89",
-            ]
-            # One large end-to-end case per family (version 7; version 6 timed 20).
-            for name, level in CONFIRM_TIMING:
-                template = next(
-                    c for c in cases if c["input_group"] == name and c["role"] == "scored"
-                )
-                cases.append(
-                    timed(
-                        dict(template, optimization_level=level),
-                        f"confirm-timing/{name}/L{level}",
-                        0,
-                        panel="confirm-timing",
-                    )
-                )
-            for name in heavy + ["multiplier_h18_n20"]:
-                template = next(
-                    c for c in cases if c["input_group"] == name and c["optimization_level"] == 2
-                )
-                cases.append(
-                    dict(
-                        copy.deepcopy(template),
-                        case_id="memory/" + name,
-                        role="memory",
-                        panel="memory",
-                        weight=0.0,
-                        modes=["memory"],
-                    )
-                )
+            cases = [case for case in cases if case["optimization_level"] in (2, 3)]
         weights = hierarchical_weights([c for c in cases if c["role"] == "scored"])
         for c in cases:
             if c["role"] == "scored":
@@ -533,7 +424,7 @@ def curate(source, root=ROOT):
         manifest = dict(
             format="qtb-manifest/1",
             profile=profile,
-            version=7,
+            version=14 if profile == "confirm-profile" else 11,
             cases=cases,
             coverage_gaps=[
                 "No line target in upstream suite",
@@ -563,7 +454,7 @@ def curate(source, root=ROOT):
         "The six RevLib artifacts with unresolved terms were replaced under plan section 3.8.",
         "Each replacement is a distinct upstream synthesis-library construction; "
         "the manifest records the mapping.",
-        "Baseline roles, cost, and oracle coverage are validated on each new runner "
+        "Baseline roles, runtime, and quality checks are validated on each new runner "
         "with A/A and known-outcome runs.",
         "",
         "| Fixture | Upstream source | License / availability |",

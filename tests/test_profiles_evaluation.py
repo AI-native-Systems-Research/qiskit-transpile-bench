@@ -48,14 +48,14 @@ def synthetic(profile="iterations-profile", ratio=0.97):
 def test_confirm_manifest_weight_contract():
     manifest, _, _ = load_profile("confirm-profile")
     scored = [c for c in manifest["cases"] if c["role"] == "scored"]
-    # Version 7 (W2): mcx_kg24_n5 is scored at level 0 only, so G5's level-2 cell is shared
-    # by one fewer group.
-    assert len(scored) == 130
-    assert len({c["input_group"] for c in scored}) == 38
+    assert len(scored) == 61
+    assert len({c["input_group"] for c in scored}) == 31
+    assert {c["optimization_level"] for c in manifest["cases"]} == {2, 3}
+    assert math.isclose(sum(c["weight"] for c in scored), 1)
     for group, expected in [
-        ("qft_n100", 1 / 96),
-        ("qv_n50_d50", 1 / 128),
-        ("mcx_kg24_n16", 1 / 320),
+        ("qft_n100", 1 / 48),
+        ("qv_n50_d50", 1 / 64),
+        ("mcx_kg24_n16", 1 / 160),
     ]:
         assert (
             next(
@@ -68,12 +68,11 @@ def test_confirm_manifest_weight_contract():
     assert all("split" not in c for c in manifest["cases"])
     assert len(manifest["replacements"]) == 6
     by_id = {c["case_id"]: c for c in manifest["cases"]}
-    for level in (1, 2, 3):
+    for level in (2, 3):
         case = by_id[f"confirm/mcx_kg24_n5/mumbai_27/L{level}"]
         assert (case["role"], case["seeds_per_block"], case["weight"]) == ("deterministic", 10, 0)
     assert by_id["confirm/multiplier_h18_n20/heavy_hex_d9_cz/L2"]["seeds_per_block"] == 100
-    timing = [c for c in manifest["cases"] if c.get("panel") == "confirm-timing"]
-    assert len(timing) == 8 and len({c["family"] for c in timing}) == 8
+    assert not [c for c in manifest["cases"] if c["role"] in {"timing", "memory"}]
 
 
 @pytest.mark.parametrize("profile", ["iterations-profile", "confirm-profile"])
@@ -131,23 +130,24 @@ def split_evidence(evidence, profile="iterations-profile"):
         f"{prefix}1/C0": "quality",
         f"{prefix}1/C6": "quality",
         f"{prefix}6/completeness": "quality",
+        "quality/runtime": "quality",
+        "benchpress/completeness": "benchpress",
     }
     stages = {}
     for row in evidence:
         if row["id"].endswith("/stage-coverage"):
             continue  # decide computes it
-        stage = owner.get(row["id"]) or ("cost" if "5/" in row["id"] else "correctness")
+        stage = owner.get(row["id"], "quality")
         stages.setdefault(stage, []).append(row)
     return stages
 
 
 @pytest.mark.parametrize("guard_regression", [False, True])
-def test_decide_replays_synthetic_session_to_known_verdict(tmp_path, guard_regression, monkeypatch):
+def test_decide_replays_synthetic_session_to_known_verdict(tmp_path, guard_regression):
     from conftest import write_session
     from qtb.canonical import read_json
     from qtb.coordinator.decide import decide
 
-    monkeypatch.setattr("qtb.coordinator.costs.replay_costs", lambda *args: args[-1])
     manifest, policy, rows, evidence = synthetic("iterations-profile")
     if guard_regression:
         guard = next(
@@ -165,9 +165,8 @@ def test_decide_replays_synthetic_session_to_known_verdict(tmp_path, guard_regre
     states = {
         "compile": complete,
         "quality": dict(complete, gate="closed" if guard_regression else "improved"),
+        "benchpress": complete,
     }
-    if not guard_regression:
-        states.update(correctness=complete, cost=complete)
     write_session(tmp_path, manifest, policy, rows, split_evidence(evidence), states)
     code, decision = decide(tmp_path, progress=lambda *_: None)
     assert decision["status"] == ("CONSTRAINT_VIOLATION" if guard_regression else "PASS")
@@ -191,63 +190,32 @@ def test_guard_failure_outranks_no_improvement():
     assert verdict(records, required) == "CONSTRAINT_VIOLATION"
 
 
-@pytest.mark.parametrize("coverage_required", [False, True])
-@pytest.mark.parametrize("semantic_result", ["passed", "failed", "unresolved"])
-def test_confirm_coverage_gaps_are_report_only_but_correctness_still_blocks(
-    tmp_path, monkeypatch, coverage_required, semantic_result
-):
+@pytest.mark.parametrize("benchpress_result", ["passed", "failed", "unresolved"])
+def test_removed_stage_evidence_is_ignored_and_benchpress_is_required(tmp_path, benchpress_result):
     from conftest import write_session
     from qtb.coordinator.decide import decide
 
-    monkeypatch.setattr("qtb.coordinator.costs.replay_costs", lambda *args: args[-1])
     manifest, policy, rows, evidence = synthetic("confirm-profile")
     assert "CA1/stage-coverage" not in policy["required_ids"]
-    if coverage_required:
-        # Archived policies still require coverage and keep the original verdict.
-        policy["required_ids"].append("CA1/stage-coverage")
-    for row in rows:
-        row["checks"] = []
     stages = split_evidence(evidence, "confirm-profile")
-    # An optimization change also requires the timing-basis cost panel.
-    stages["cost"].append(record("CA5/timing-basis", "cost", "passed"))
-    if semantic_result == "failed":
-        stages["correctness"].append(
-            record("behavior/evolved/example/0", "correctness", "failed")
-        )
-    elif semantic_result == "unresolved":
-        for row in stages["correctness"]:
-            if row["id"] == "CA1/C1-C5":
-                row["result"] = "unresolved"
+    stages["benchpress"][0]["result"] = benchpress_result
+    stages["correctness"] = [record("behavior/evolved/example/0", "correctness", "failed")]
+    stages["cost"] = [record("CA5/timing", "cost", "failed")]
     complete = {"status": "complete"}
     write_session(
         tmp_path, manifest, policy, rows, stages,
         {"compile": complete, "quality": dict(complete, gate="improved"),
-         "correctness": complete, "cost": complete},
-        run={"scope": {
-            str(level): {"stages": ["optimization"], "components": [], "unmapped_paths": []}
-            for level in range(4)
-        }},
+         "benchpress": complete, "correctness": complete, "cost": complete},
     )
     code, decision = decide(tmp_path, progress=lambda *_: None)
-    expected = (
-        (20, "CONSTRAINT_VIOLATION") if semantic_result == "failed" else
-        (30, "INCONCLUSIVE") if coverage_required or semantic_result == "unresolved" else
-        (0, "PASS")
-    )
-    assert (code, decision["status"]) == expected
-    coverage = next(r for r in decision["constraints"] if r["id"] == "CA1/stage-coverage")
-    assert coverage["result"] == "unresolved"
-    assert set(coverage["cases"]) == {
-        c["case_id"] for c in manifest["cases"] if c["role"] == "scored"
+    expected = {"passed": (0, "PASS"), "failed": (20, "CONSTRAINT_VIOLATION"),
+                "unresolved": (30, "INCONCLUSIVE")}
+    assert (code, decision["status"]) == expected[benchpress_result]
+    assert "benchpress/completeness" in decision["required_ids"]
+    assert not any(row["id"].startswith(("behavior/", "CA5/")) for row in decision["constraints"])
+    assert {row["stage"] for row in decision["stages"]} == {
+        "compile", "quality", "benchpress", "unit-tests",
     }
-    assert ("CA1/stage-coverage" in decision["required_ids"]) == coverage_required
-    assert any(r["code"] == "CA1/stage-coverage" for r in decision["reasons"]) == coverage_required
-    report = (tmp_path / "report.md").read_text()
-    assert "Uncovered scored cases:" in report
-    if coverage_required:
-        assert "Automatic acceptance requires verified coverage" in report
-    else:
-        assert "Stage coverage: unresolved (report-only; does not affect verdict)." in report
 
 
 @pytest.mark.parametrize("mutation", ["missing", "zero", "audit"])
@@ -357,7 +325,7 @@ def test_mixed_seed_counts_resolve_every_quality_summary():
     assert by_id["CA2/improvement"]["result"] == "passed"
     assert by_id["CA3/breadth"]["result"] == "passed"
     families = [i for i in by_id if i.startswith(("CA4/family/", "CA4/optimization_level/"))]
-    assert len(families) >= 2 * (8 + 4)
+    assert len(families) == 2 * (8 + 2)
     assert all(by_id[i]["result"] == "passed" for i in families)
     objective = summaries["CA2/improvement"]
     assert objective["seed_counts"] == {"min": 50, "max": 100}
@@ -367,8 +335,12 @@ def test_mixed_seed_counts_resolve_every_quality_summary():
         if name.startswith(("CA4/size_band/", "CA4/topology/", "CA4/native_basis/",
                             "leave_family_out/", "leave_iterations_out")):
             assert "score" in summary, name
-    assert summaries["instance_bootstrap"]["status"] == "reported"
-    assert math.isfinite(summaries["instance_bootstrap"]["U_instance"])
+    # The L2/L3-only panel has one independent group in G2 and G7; do not claim
+    # an instance-bootstrap uncertainty bound without its required group coverage.
+    bootstrap = summaries["instance_bootstrap"]
+    assert bootstrap["status"] == "unverified"
+    assert bootstrap["group_counts"]["G2"] == bootstrap["group_counts"]["G7"] == 1
+    assert "U_instance" not in bootstrap
     # Both metrics of the score without the iterations groups, over the same cases.
     held_out = [summaries["leave_iterations_out"], summaries["leave_iterations_out/N2"]]
     assert [s["metric"] for s in held_out] == ["D2", "N2"]
@@ -517,7 +489,7 @@ def test_confirm_aggregate_margin_is_only_for_family_and_level(metric, ratio, ex
             )
     records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
     by_id = {r["id"]: r for r in records}
-    for scope in ("family/G8", "optimization_level/0"):
+    for scope in ("family/G8", "optimization_level/2"):
         result = by_id[f"CA4/{scope}/{metric}"]
         assert result["result"] == expected
         assert result["threshold"] == math.log1p(0.05)
@@ -587,7 +559,7 @@ def test_archived_policy_keeps_zero_margins():
     records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
     by_id = {r["id"]: r for r in records}
     assert by_id["CA4/family/G8/N2"]["result"] == "failed"
-    assert by_id["CA4/optimization_level/0/N2"]["result"] == "failed"
+    assert by_id["CA4/optimization_level/2/N2"]["result"] == "failed"
     assert by_id[f"CA4/exact/{case['case_id']}"]["result"] == "failed"
     assert all(
         r["result"] == "failed" and r["guard_tolerance"] == 0

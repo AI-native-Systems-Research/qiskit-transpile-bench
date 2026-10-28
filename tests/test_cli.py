@@ -34,7 +34,7 @@ def test_compile_accepts_confirm_profile():
 
 
 @pytest.mark.parametrize(
-    "command", ["quality", "correctness", "unit-tests", "cost", "decide", "clean"]
+    "command", ["quality", "benchpress", "unit-tests", "decide", "clean"]
 )
 def test_stage_commands_take_only_the_results_root(command):
     assert parser().parse_args([command, "--results-root", "s"]).results_root.name == "s"
@@ -75,5 +75,5 @@ def test_compile_needs_an_existing_store(tmp_path, monkeypatch, capsys):
 
 
 def test_stages_on_a_missing_session_are_precondition_failures(tmp_path):
-    for command in ("quality", "correctness", "unit-tests", "cost", "decide", "clean"):
+    for command in ("quality", "benchpress", "unit-tests", "decide", "clean"):
         assert main([command, "--results-root", str(tmp_path / "nothing")]) == 41

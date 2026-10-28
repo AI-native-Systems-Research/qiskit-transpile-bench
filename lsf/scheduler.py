@@ -10,10 +10,8 @@ queue delays, signal deaths and stage exit codes are never confused:
 - ``query`` returns a ``JobStatus``; a failed query raises ``QueryFailed``, which is never
   proof that a job has gone. ``NOTFOUND`` means ``bjobs`` no longer lists it.
 
-Allocations are fixed: 16 slots for every job except cost, which has 9 exclusive physical
-cores on one quiet host of the approved hardware tier; a cost retry may also exclude hosts
-that were noisy for earlier attempts (``lsf.retry.excluded_hosts``). Memory requests are in
-GB, as the site's ``LSF_UNIT_FOR_LIMITS`` is.
+Allocations are fixed: 16 slots for every active stage. Memory requests are in GB,
+as the site's ``LSF_UNIT_FOR_LIMITS`` is. Legacy cost requests remain readable for old ledgers.
 """
 
 import getpass
@@ -28,7 +26,7 @@ from lsf import logging as log
 
 NON_COST_SLOTS = 16
 COST_SLOTS = 9
-KINDS = ("manager", "compile", "quality", "correctness", "unit-tests", "cost", "clean")
+KINDS = ("manager", "compile", "quality", "benchpress", "unit-tests", "clean")
 TERMINAL = {"DONE", "EXIT"}
 ACTIVE = {"PEND", "PSUSP", "RUN", "USUSP", "SSUSP", "WAIT", "PROV"}
 FIELDS = "jobid stat exit_code exec_host pend_reason job_name user"

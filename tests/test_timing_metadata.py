@@ -1,27 +1,20 @@
-from qtb.canonical import read_json
-from qtb.config import data_root, load_profile
+from qtb.config import load_profile
+from qtb.coordinator import quality_cases
+from qtb.coordinator.quality import RUNTIME_PROTOCOL
 
 
-def test_t1_t2_metadata_matches_frozen_fixture_provenance():
-    provenance = {
-        row["input_group"]: row
-        for row in read_json(data_root() / "fixtures/provenance.json")
-    }
-    source = "test/benchmarks/transpiler_benchmarks.py"
+def test_quality_runtime_covers_full_current_profiles_without_small_cost_panels():
     for profile in ("iterations-profile", "confirm-profile"):
         manifest, policy, _ = load_profile(profile)
         assert manifest["version"] == policy["version"] == (
-            13 if profile == "confirm-profile" else 10
+            14 if profile == "confirm-profile" else 11
         )
-        for case_id, name in (("T1", "single_h"), ("T2", "cancel_2q")):
-            case = next(case for case in manifest["cases"] if case["case_id"] == case_id)
-            fixture = provenance[name]
-            assert case["input_group"] == name
-            assert case["circuit"] == fixture["artifact"]
-            assert case["provenance"] == {
-                "commit": fixture["commit"], "grade": "A", "source": source,
-            }
-            assert case["family"] == "timing_microbenchmark"
-            assert case["topology"] == "heavy_hex"
-            assert case["target"]["file"] == "targets/mumbai_27_loose.target.json"
-            assert fixture["source"] == source
+        assert quality_cases(manifest) == manifest["cases"]
+        assert not {"timing", "memory"} & {case["role"] for case in manifest["cases"]}
+        assert "quality/runtime" in policy["required_ids"]
+        if profile == "confirm-profile":
+            assert {case["optimization_level"] for case in manifest["cases"]} == {2, 3}
+    assert RUNTIME_PROTOCOL == {
+        "mode": "timing_e2e", "warmups": 1, "warmups_once": True,
+        "minimum_calls": 1, "minimum_ns": 0,
+    }

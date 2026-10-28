@@ -152,36 +152,23 @@ def make_world(tmp_path, monkeypatch):
         self.evidence(record("IA1/C6", "correctness", "passed"))
         self.evidence(record("IA6/completeness", "completeness", "passed"))
 
-    def behavior_checks(comparison, revisions):
-        maybe_fail("correctness")
-        knobs.calls.append(("behavior", revisions))
-        for revision in revisions:
-            subject = "reference" if revision == "baseline" else "evolved"
-            good = knobs.baseline_correct if revision == "baseline" else knobs.candidate_correct
-            append_record(
-                comparison.directory / "correctness.jsonl",
-                {"case_id": "c", "revision": revision, "seed": 0, "status": "verified"},
-            )
-            if not good:
-                comparison.evidence(
-                    record(f"behavior/{revision}/c/0", "correctness", "failed", subject)
-                )
-            comparison.evidence(record(f"IA1/C1-C5/{revision}", "correctness", "passed", subject))
-        comparison.evidence(record("IA1/C1-C5", "correctness", "passed"))
-        return knobs.decisive
+    def runtime(comparison, cases, rows):
+        maybe_fail("runtime")
+        comparison.evidence(record("quality/runtime", "completeness", "passed"))
+        for row in rows:
+            row["runtime_ns"] = 1_000_000 if row["revision"] == "baseline" else 900_000
+            row["runtime_measurement"] = {"status": "ok"}
+        (comparison.directory / "observations.jsonl").unlink(missing_ok=True)
+        for row in rows:
+            append_record(comparison.directory / "observations.jsonl", row)
+        return rows
 
-    def clifford_checks(comparison, cases, revisions):
+    def benchpress(comparison):
+        maybe_fail("benchpress")
         time.sleep(knobs.slow)
-        for revision in revisions:
-            append_record(
-                comparison.directory / "clifford.jsonl",
-                {"case_id": "c", "revision": revision, "mode": "prefix", "status": "verified"},
-            )
-        both = {r["revision"] for r in read_records(comparison.directory / "clifford.jsonl")}
-        comparison.evidence(
-            record("IA1/C7", "correctness", "passed" if len(both) == 2 else "unresolved")
-        )
-        return True
+        comparison.reset_evidence()
+        comparison.evidence(record("benchpress/completeness", "completeness", "passed"))
+        return {}
 
     def upstream_checks(comparison):
         maybe_fail("unit-tests")
@@ -190,26 +177,16 @@ def make_world(tmp_path, monkeypatch):
         comparison.evidence(record("IA1/upstream/evolved", "correctness", result))
         comparison.evidence(record("IA1/upstream", "correctness", "passed"))
 
-    def measure_costs(comparison):
-        from qtb.coordinator.costs import required_cost_panels
-
-        maybe_fail("cost")
-        knobs.calls.append("measure costs")
-        for name in required_cost_panels(comparison):
-            comparison.evidence(record(f"IA5/{name}", "cost", "passed"))
-
     monkeypatch.setattr(Comparison, "build", build)
     monkeypatch.setattr(Comparison, "roundtrip", roundtrip)
     monkeypatch.setattr(Comparison, "roundtrip_cases", lambda self: [])
     monkeypatch.setattr(Comparison, "quality", quality)
     monkeypatch.setattr(Comparison, "audit", audit)
     monkeypatch.setattr(Comparison, "aggregate_checks", aggregate_checks)
-    monkeypatch.setattr("qtb.coordinator.checks.behavior_checks", behavior_checks)
-    monkeypatch.setattr("qtb.coordinator.checks.clifford_checks", clifford_checks)
     monkeypatch.setattr("qtb.coordinator.upstream.upstream_checks", upstream_checks)
-    monkeypatch.setattr("qtb.coordinator.costs.measure_costs", measure_costs)
-    # Cost bundles are fake, so the evidence is taken as measured.
-    monkeypatch.setattr("qtb.coordinator.costs.replay_costs", lambda *args: args[-1])
+    monkeypatch.setattr("qtb.coordinator.stages.measure_quality_runtime", runtime)
+    monkeypatch.setitem(__import__("qtb.coordinator.stages", fromlist=["BODIES"]).BODIES,
+                        "benchpress", benchpress)
     monkeypatch.setattr("qtb.coordinator.stages.host_mismatch", lambda build: None)
     return SimpleNamespace(
         knobs=knobs, store=store, sources=sources, root=tmp_path, manifest=manifest, policy=policy
@@ -229,7 +206,7 @@ def compile_(world, name="s1", evolved="idea", baseline="main", **kwargs):
     return root, code
 
 
-def chain(root, stages=("quality", "correctness", "unit-tests", "cost")):
+def chain(root, stages=("quality", "benchpress", "unit-tests")):
     return {stage: run_stage(root, stage, progress=QUIET) for stage in stages}
 
 

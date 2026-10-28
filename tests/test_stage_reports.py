@@ -31,16 +31,15 @@ def test_stage_reports_exist_before_decide_and_survive_cleanup(world, ratio, exp
     assert all(code == 0 for code in chain(root).values())
     assert not (root / "report.md").exists()
     hashes = {}
-    for stage in ("correctness", "unit-tests", "cost"):
+    for stage in ("benchpress", "unit-tests"):
         saved = read_json(root / f"stages/{stage}/report.json")
         assert saved["format"] == f"qtb-{stage}-report/1"
-        assert saved["status"] == expected
+        assert saved["status"] == ("complete" if stage == "benchpress" else expected)
         assert (root / f"stages/{stage}/report.md").exists()
         hashes[stage] = file_hash(root / f"stages/{stage}/report.json")
     decision = verdict(root)[1]
     final = (root / "report.md").read_text()
-    assert all(heading in final for heading in ("## Correctness tests", "## Unit tests",
-                                                "## Cost tests"))
+    assert all(heading in final for heading in ("## Benchpress", "## Unit tests"))
     assert set(decision["test_reports"]) == set(hashes)
     # Cleaning bulk keeps all report detail available for a later decision.
     assert clean(root, progress=QUIET) == 0
@@ -168,15 +167,7 @@ def test_old_unit_evidence_explicitly_marks_missing_details(tmp_path):
     assert "Individual test details unavailable" in rendered(report)
 
 
-def test_cached_baseline_is_visible_and_retry_report_excludes_old_failure(world):
-    first, _ = compile_(world)
-    chain(first, ("quality", "correctness"))
-    second, _ = compile_(world, name="second", evolved="idea2")
-    chain(second, ("quality", "correctness"))
-    report = read_json(second / "stages/correctness/report.json")
-    assert report["reused"]["baseline_correctness"]
-    baseline = [r for r in report["checks"] if r["revision"] == "baseline"]
-    assert baseline and all(r["cached_from"] for r in baseline)
+def test_retry_report_excludes_old_failure(world):
     third, _ = compile_(world, name="third")
     chain(third, ("quality",))
     world.knobs.fail_once.add("unit-tests")

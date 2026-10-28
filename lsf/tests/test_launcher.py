@@ -32,8 +32,6 @@ def argv(paths, *extra, session="sessions/s1"):
         str(paths / "baseline"),
         "--evolved",
         str(paths / "evolved"),
-        "--cost-ncpus",
-        "56",
         *extra,
     ]
 
@@ -60,8 +58,6 @@ def test_explicit_arguments_win_over_environment_fallbacks(paths):
             str(paths / "baseline"),
             "--evolved",
             str(paths / "evolved"),
-            "--cost-ncpus",
-            "56",
         ],
         environ,
     )
@@ -72,33 +68,33 @@ def test_explicit_arguments_win_over_environment_fallbacks(paths):
 
 
 def test_the_configuration_is_fixed_where_the_plan_fixes_it(paths):
-    config = resolve(argv(paths, "--queue", "normal", "--cost-queue", "quiet"))
+    config = resolve(argv(paths, "--queue", "normal", "--benchpress-queue", "quiet"))
     resources = config["resources"]
     assert {job: r["slots"] for job, r in resources.items()} == {
         "compile": 16,
         "quality": 16,
-        "correctness": 16,
+        "benchpress": 16,
         "unit-tests": 16,
-        "cost": 9,
         "clean": 16,
         "manager": 16,
     }
-    assert resources["cost"]["queue"] == "quiet" and resources["compile"]["queue"] == "normal"
-    assert config["tier"] == {"model": None, "ncpus": 56}
-    assert config["cost_selector"]["max_r1m"] == 10.0
-    assert config["max_cost_retries"] == 20 and config["unit_tests"] is False
+    assert resources["benchpress"]["queue"] == "quiet" and resources["compile"]["queue"] == "normal"
+    assert config["unit_tests"] is False
+    assert "cost_selector" not in config and "tier" not in config
     help_text = submit.parser().format_help()
     for group in (
         "session inputs",
         "shared paths",
         "execution",
         "cluster resources",
-        "quiet-node selection",
         "resuming",
         "logging",
     ):
         assert group in help_text
-    for absent in ("--dry-run", "--name", "--max-retries", "--cost-slots"):
+    for absent in (
+        "--dry-run", "--name", "--max-retries", "--cost-slots", "--cost-ncpus",
+        "--cost-wall", "--correctness-wall", "--upgrade-cost",
+    ):
         assert absent not in help_text
 
 
@@ -107,9 +103,7 @@ def test_the_configuration_is_fixed_where_the_plan_fixes_it(paths):
     [
         ((), "sessions/exists", "already exists"),
         ((), "missing-parent/s1", "does not exist"),
-        (("--cost-ncpus", "8"), "sessions/s1", "must exceed"),
-        (("--cost-model", "bad model"), "sessions/s1", "invalid --cost-model"),
-        (("--cost-wall", "tomorrow"), "sessions/s1", "--cost-wall"),
+        (("--benchpress-wall", "tomorrow"), "sessions/s1", "--benchpress-wall"),
         (("--compile-mem-gb", "0"), "sessions/s1", "must be positive"),
         (("--manager-wall", "8:00"), "sessions/s1", "--manager-wall must be longer"),
         (("--queue", "no;way"), "sessions/s1", "invalid queue"),
@@ -121,11 +115,8 @@ def test_invalid_configurations_are_refused_before_submission(paths, extra, sess
         resolve(argv(paths, *extra, session=session))
 
 
-def test_a_tier_and_a_store_are_required(paths):
+def test_a_store_and_source_inputs_are_required(paths):
     arguments = argv(paths)
-    at = arguments.index("--cost-ncpus")
-    with pytest.raises(submit.Refused, match="hardware tier"):
-        resolve(arguments[:at] + arguments[at + 2 :])
     with pytest.raises(submit.Refused, match="--store"):
         resolve(arguments[2:])
     with pytest.raises(submit.Refused, match="is not an existing directory"):
@@ -178,7 +169,8 @@ def test_the_launcher_runs_as_a_file_without_shadowing_the_standard_library():
         cwd=ROOT / "lsf",
     )
     assert result.returncode == 0, result.stderr
-    assert "quiet-node selection" in result.stdout
+    assert "--benchpress-wall" in result.stdout
+    assert "quiet-node selection" not in result.stdout
 
 
 def test_launcher_holds_the_orchestration_lock_until_acceptance_is_saved(paths):

@@ -66,6 +66,12 @@ def planned_deletions(root):
     root = Path(root)
     directories = [root / "builds" / "evolved-build", root / "verifier", root / "verifier-cache"]
     directories += [root / "jobs", root / "oracle-jobs"]
+    # Benchpress owns private environments and source checkouts, not shared store data.
+    # Its panel, paired measurements, summary and raw logs stay available after cleanup.
+    directories += [
+        root / "stages" / "benchpress" / name
+        for name in ("env", "repositories", "sources", "plugin-wheels")
+    ]
     directories += sorted(p for p in (root / "builds").glob("*") if p.is_dir())
     for upstream in sorted(p for p in root.glob("upstream-*") if p.is_dir()):
         # The copied test tree, and the crates of a session-local CARGO_HOME.

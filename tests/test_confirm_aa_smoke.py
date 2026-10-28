@@ -71,7 +71,7 @@ def smoke(tmp_path_factory):
         for case in manifest["cases"]
         if case["input_group"] in GROUPS
         and case["role"] == "scored"
-        and case["optimization_level"] in (1, 2)
+        and case["optimization_level"] in (2, 3)
     ]
     assert len(cases) == 2 * len(GROUPS)
     return quality_aa(tmp_path_factory.mktemp("aa-smoke"), cases, policy)
@@ -82,7 +82,7 @@ def test_the_audit_proves_the_ties_of_vf2layout(tmp_path):
     cases = [
         dict(case, seeds_per_block=SEEDS)
         for case in manifest["cases"]
-        if case["case_id"] in {f"confirm/queko_bigd_20/tokyo_20/L{level}" for level in (1, 2)}
+        if case["case_id"] in {f"confirm/queko_bigd_20/tokyo_20/L{level}" for level in (2, 3)}
     ]
     assert [case["role"] for case in cases] == ["deterministic"] * 2
     # Every row is audited, so the ties are met whatever the sample.
@@ -120,7 +120,14 @@ def test_c6_passes_on_every_seed_of_the_former_failures(smoke):
         for c in row["checks"]
         if c["oracle"] == "C6" and c["status"] != "verified"
     ]
-    assert {c["layout_equality"] for c in c6} == {"matched"}
+    for row in rows:
+        level = next(case["optimization_level"] for case in cases
+                     if case["case_id"] == row["case_id"])
+        for check in row["checks"]:
+            if check["oracle"] == "C6":
+                assert check["layout_equality"] in (
+                    {"matched", "skipped"} if level == 3 else {"matched"}
+                )
 
 
 def test_an_aa_of_the_harness_checks_is_clean(smoke):

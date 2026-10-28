@@ -140,46 +140,34 @@ def test_policy_and_job_reject_invalid_timing_protocol():
         bad_policy["measurement_protocol"][key] = value
         with pytest.raises(HarnessError, match=key):
             validate("policy", bad_policy)
-    bad_policy = deepcopy(policy)
-    del bad_policy["measurement_protocol"]["screen_rounds"]
-    with pytest.raises(HarnessError, match="screen_rounds"):
-        validate("policy", bad_policy)
+    # Cost fields are optional for archived policies; current profiles omit them.
+    thresholds = {
+        "panel_ratio": 1.10, "case_ratio": 1.20, "case_floor_ns": 25_000_000,
+        "case_floor_bytes": 32 * 1024 * 1024, "screen_fraction": 0.5,
+    }
     for key, value in (("panel_ratio", 1.0), ("screen_fraction", 1.5), ("case_floor_ns", -1)):
         bad_policy = deepcopy(policy)
-        bad_policy["cost_thresholds"][key] = value
+        bad_policy["cost_thresholds"] = dict(thresholds, **{key: value})
         with pytest.raises(HarnessError, match=key):
             validate("policy", bad_policy)
     bad_policy = deepcopy(policy)
-    bad_policy["cost_thresholds"]["noise_panel"] = 0.03
+    bad_policy["cost_thresholds"] = dict(thresholds, noise_panel=0.03)
     with pytest.raises(HarnessError, match="noise_panel"):
         validate("policy", bad_policy)
-    bad_policy = deepcopy(policy)
-    del bad_policy["cost_thresholds"]
-    with pytest.raises(HarnessError, match="cost_thresholds"):
-        validate("policy", bad_policy)
+    validate("policy", policy)
 
 
-def test_shipped_profiles_screen_then_measure_at_their_own_full_count():
-    from qtb.evaluator.cost import regime_counts
-
-    expected = {"iterations-profile": (6, 5, 20), "confirm-profile": (10, 3, 10)}
-    for profile, (full, memory, companion) in expected.items():
+def test_shipped_profiles_require_quality_runtime_and_benchpress():
+    for profile in ("iterations-profile", "confirm-profile"):
         _, policy, _ = load_profile(profile, verify=False)
         protocol = policy["measurement_protocol"]
-        assert protocol["minimum_calls"] == 2
-        assert not any(key.startswith("calibration") for key in protocol)
-        assert regime_counts("timing", protocol) == {"screen": 4, "normal": full, "rerun": 2 * full}
-        assert regime_counts("companion", protocol) == {"normal": 3, "rerun": 6}
-        assert regime_counts("memory", protocol) == {"normal": memory, "rerun": 2 * memory}
-        assert protocol["companion_seeds"] == list(range(companion))
-        assert policy["cost_thresholds"] == {
-            "panel_ratio": 1.10,
-            "case_ratio": 1.20,
-            "case_floor_ns": 25_000_000,
-            "case_floor_bytes": 32 * 1024 * 1024,
-            "screen_fraction": 0.5,
-        }
-        assert not any(id_.startswith("calibration/") for id_ in policy["required_ids"])
+        assert not {"timing_rounds", "screen_rounds", "companion_seeds", "memory_processes"} & (
+            protocol.keys()
+        )
+        assert "cost_thresholds" not in policy
+        assert {"quality/runtime", "benchpress/completeness"} <= set(policy["required_ids"])
+        assert not any("5/" in id_ or id_.endswith(("/C1-C5", "/C7"))
+                       for id_ in policy["required_ids"])
 
 
 @pytest.mark.parametrize("scope", ["aggregate", "individual", "deterministic"])
@@ -205,7 +193,7 @@ def test_quality_guard_policy_defaults_and_scope():
     assert "quality_guard_tolerances" not in iterations
 
 
-def test_a_required_cost_panel_needs_cases(tmp_path):
+def test_confirm_profile_rejects_levels_outside_two_and_three(tmp_path):
     import json
     import shutil
 
@@ -213,7 +201,7 @@ def test_a_required_cost_panel_needs_cases(tmp_path):
     shutil.copytree(data_root() / "profiles", root / "profiles")
     path = root / "profiles/confirm-profile/manifest.json"
     manifest = json.loads(path.read_text())
-    manifest["cases"] = [c for c in manifest["cases"] if c.get("panel") != "confirm-timing"]
+    manifest["cases"][0]["optimization_level"] = 1
     path.write_text(json.dumps(manifest))
-    with pytest.raises(HarnessError, match="CA5/confirm-timing"):
+    with pytest.raises(HarnessError, match="optimization level 2 or 3"):
         load_profile("confirm-profile", root, verify=False)

@@ -34,9 +34,8 @@ jobs:
           $Q compile --baseline "$QTB_BASELINE_PATH" --evolved "$QTB_EVOLVED_PATH" \
             --store "$QTB_STORE" --profile confirm-profile --results-root "$SESSION" &&
           $Q quality --results-root "$SESSION" &&
-          $Q correctness --results-root "$SESSION" &&
-          $Q unit-tests --results-root "$SESSION" &&
-          $Q cost --results-root "$SESSION"
+          $Q benchpress --results-root "$SESSION" &&
+          $Q unit-tests --results-root "$SESSION"
           $Q decide --results-root "$SESSION"
       - name: Archive evidence and source snapshots
         if: always()

@@ -3,7 +3,7 @@
 Each command does one stage against one session directory (``--results-root``)::
 
     compile --baseline PATH --evolved PATH --store DIR [--profile P] [--results-root DIR]
-    quality | correctness | unit-tests | cost | decide | clean   [--results-root DIR]
+    quality | benchpress | unit-tests | decide | clean   [--results-root DIR]
 
 Stage exit statuses: 0 complete or skipped, 40 the stage failed, 41 a precondition is not
 met, 42 the stage detected interference and ended ``noisy``, 64 usage. ``decide`` exits with
@@ -24,7 +24,7 @@ from qtb.coordinator.stages import (
 )
 from qtb.errors import HarnessError, Precondition, Usage
 
-STAGE_COMMANDS = ("quality", "correctness", "unit-tests", "cost")
+STAGE_COMMANDS = ("quality", "benchpress", "unit-tests")
 
 
 class Parser(argparse.ArgumentParser):
@@ -51,10 +51,9 @@ def parser():
     )
     compile_.add_argument("--results-root", type=Path, default=Path("results"))
     helps = {
-        "quality": "quality compiles, C0, C6, the audit and the gate",
-        "correctness": "C1-C5, API contracts and C7 (only when the gate is open)",
+        "quality": "quality, paired runtime, C0, C6, the audit and the gate",
+        "benchpress": "Benchpress quality and runtime comparison at levels 2 and 3",
         "unit-tests": "optional upstream Python and Rust tests (only when the gate is open)",
-        "cost": "timing and memory panels on a quiet host (gate open, correctness passed)",
         "decide": "merge the evidence, write the verdict and report, then clean",
         "clean": "delete the session's bulk after decide, keeping its results",
     }

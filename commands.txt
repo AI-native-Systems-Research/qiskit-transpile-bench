@@ -1,4 +1,39 @@
+# Local macOS comparison: copy this entire block into your terminal.
+# Requires uv, rustup, Git, Python 3.11+, and the Xcode command-line tools.
+# --evolved must be the Qiskit checkout root, not preset_passmanagers/.
+# Each run creates a fresh session; use its printed path to resume individual stages.
+(
+    set -e
+    cd /Users/ophir/PycharmProjects/qiskit-transpile-bench
+    uv sync --all-extras
+    rustup toolchain install 1.89
+    mkdir -p "$PWD/qtb-store"
+    QTB_SESSION="$PWD/qtb-sessions/swap-absorption-local-$(date +%Y%m%d-%H%M%S)"
+    printf 'Session and reports: %s\n' "$QTB_SESSION"
 
+    uv run qiskit-transpile-bench compile \
+        --store "$PWD/qtb-store" \
+        --results-root "$QTB_SESSION" \
+        --baseline /Users/ophir/PycharmProjects/qiskit-swap-absorption-before \
+        --evolved /Users/ophir/PycharmProjects/qiskit-swap-absorption \
+        --profile confirm-profile
+
+    # Run on an otherwise idle machine for paired runtime measurements.
+    uv run qiskit-transpile-bench quality --results-root "$QTB_SESSION"
+
+    uv run qiskit-transpile-bench benchpress --results-root "$QTB_SESSION"
+    # Optional upstream Python and Rust tests (uncomment to include):
+    # uv run qiskit-transpile-bench unit-tests --results-root "$QTB_SESSION"
+
+
+    # Writes report.md and decision.json; automatically cleans session build files.
+    # Verdict exits: 0 PASS, 10 NO_IMPROVEMENT, 20 CONSTRAINT_VIOLATION,
+    # 30 INCONCLUSIVE, 40 ERROR.
+    uv run qiskit-transpile-bench decide --results-root "$QTB_SESSION"
+)
+
+# Historical LSF commands below require their archived harness (cost flags are retired).
+# For current usage see docs/cluster.md.
 uv run python lsf/submit.py   --store ./qtb-store \
     --results-root ./qtb-sessions/aa-20260927_v2  \
     --baseline /u/ophirazu/projects/qiskit  \
@@ -53,4 +88,3 @@ uv run python lsf/submit.py   --store ./qtb-store \
     --profile confirm-profile  \
     --cost-ncpus 56  \
     --cost-max-r1m 10
-

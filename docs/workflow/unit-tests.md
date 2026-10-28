@@ -1,6 +1,6 @@
 # 4. unit-tests (optional)
 
-[Documentation index](../README.md) · [← correctness](correctness.md) · [cost →](cost.md)
+[Documentation index](../README.md) · [← Benchpress](benchpress.md) · [decide →](decide.md)
 
 Run upstream Python and Rust tests on both revisions. Neither profile requires this stage,
 but once started its results bind the verdict.
@@ -12,14 +12,14 @@ uv run qiskit-transpile-bench unit-tests --results-root "$S"
 ```
 
 `S` is the session directory chosen at `compile`. `quality` must be complete and the gate
-open. This stage can run alongside `correctness` on a busy host. See [session
+open. Run it after the timing stages to avoid competing with their measurements. See [session
 rules](../sessions.md) for prerequisites, retries and stage exit codes.
 
 ## What runs
 
 Implemented in `src/qtb/coordinator/upstream.py`. These suites are **optional**: they form
 their own stage, `unit-tests`, which either profile may run once the quality gate is open,
-alongside `correctness`. The rule is: **if you run it, it counts.** Once the stage has
+after Benchpress. The rule is: **if you run it, it counts.** Once the stage has
 started (running, failed or complete), `decide` requires `IA1/upstream` or `CA1/upstream`.
 If it never started, or the gate skipped it, the verdict is decided without it and the
 report says "Upstream tests: not run."
@@ -87,6 +87,4 @@ Measured Python runs are roughly 3–4 minutes each: baseline-owned tests on bot
 the evolved tree's own tests. Rust runs for both builds as well. The budgets are four hours
 for Python and three for Rust; a complete baseline result from the store saves its runs.
 
-This stage does not block [cost](cost.md), which depends only on correctness. Once unit
-tests have started, run [decide](decide.md) after they finish so their result counts. If you
-start unit tests after an earlier decision, rerun `decide` before [clean](clean.md).
+After quality, Benchpress and optional tests finish, run [decide](decide.md).

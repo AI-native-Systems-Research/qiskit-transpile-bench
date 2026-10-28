@@ -1,22 +1,7 @@
-"""``decide``: merge committed stage evidence into the session's verdict and report.
+"""Merge committed compile, quality, Benchpress and optional test evidence.
 
-It can run any time after ``compile`` created the session, as often as you like, also after
-``clean``. It reads only committed evidence (``complete`` stages, and the crash record of a
-``failed`` one) from a consistent snapshot of the stage states, under the shared lifecycle
-lock. It writes ``evidence.json``, ``decision.json``, ``report.md`` and ``progress.log`` and
-never rewrites ``run.json``. Every amendment of ``run.json`` (``qtb.coordinator.amend``) is
-applied and noted in the verdict.
-
-Required stages are conditional: ``compile`` and ``quality`` always; ``correctness`` when the
-gate is open; ``cost`` when the gate is open and correctness found no failure; ``unit-tests``
-once it has started. A required stage that has not finished gives ``INCONCLUSIVE``; a failed
-stage gives ``ERROR`` through its ``harness/error/<stage>`` record. The verdict function is
-unchanged; these rules are applied around it.
-
-A ``noisy`` stage is unfinished: its last invocation was discarded because interference was
-detected. The report says so, separately from any observed cost regression. Replayed cost
-bundles must satisfy the session's ``cost_evidence`` requirement, also after ``clean``; the
-report labels which kind of cost evidence the session holds.
+Decide may run after compilation and after cleanup. Required stages that have not
+finished leave the verdict inconclusive; failed stages contribute harness errors.
 """
 
 import hashlib
@@ -24,16 +9,14 @@ import json
 from pathlib import Path
 
 from qtb.canonical import atomic_bytes, digest, read_json, write_json
-from qtb.config import data_root, implementation_identity
-from qtb.coordinator import profile_prefix, stage_coverage
+from qtb.config import implementation_identity
+from qtb.coordinator import profile_prefix
 from qtb.coordinator.amend import effective
 from qtb.coordinator.amend import notes as amendment_notes
 from qtb.coordinator.runlog import duration
 from qtb.coordinator.stages import (
     FINAL,
     STAGE_ORDER,
-    baseline_correctness_key,
-    cost_due,
     stage_path,
     state_hash,
 )
@@ -129,7 +112,6 @@ def _reuse_notes(states, store):
     for stage, field, label in (
         ("compile", "baseline_build", "baseline build"),
         ("quality", "baseline_quality", "baseline quality"),
-        ("correctness", "baseline_correctness", "baseline correctness"),
         ("unit-tests", "baseline_unit_tests", "baseline unit tests"),
     ):
         value = ((states[stage] or {}).get("reused") or {}).get(field)
@@ -138,67 +120,11 @@ def _reuse_notes(states, store):
         if isinstance(value, list):
             notes.append(f"{label}: from the store ({len(value)} entries).")
             continue
-        kind = {"baseline_correctness": "correctness", "baseline_unit_tests": "unit-tests"}.get(
-            field
-        )
+        kind = "unit-tests" if field == "baseline_unit_tests" else None
         first = store.first_computed(kind, value) if store and kind else None
         when = f", first computed {first[:10]}" if first else ""
         notes.append(f"{label}: from the store (key {value[:12]}…{when}).")
     return notes
-
-
-def _stored_baseline_note(root, run, policy, states, store):
-    """With correctness not run, say whether the baseline's correctness is known."""
-    if store is None or not run.get("builds", {}).get("baseline"):
-        return None
-    from qtb.coordinator import Comparison
-
-    probe = Comparison.__new__(Comparison)
-    probe.data, probe.run = data_root(), run
-    try:
-        identity = probe.verifier_identity()
-    except (HarnessError, OSError):
-        return None
-    machine = (states["quality"] or {}).get("machine") or run.get("machine", {})
-    key = baseline_correctness_key(run, policy, machine, identity, probe.data / "fixtures")
-    entry = store.read_results("correctness", key) if key else None
-    if entry is None:
-        return "Baseline correctness: not known from the store for this baseline."
-    preflight = next(
-        (r for r in read_json(entry / "evidence.json") if r["id"] == "baseline/preflight"), None
-    )
-    result = preflight["result"] if preflight else "unknown"
-    return (
-        f"Baseline correctness: known from the store (key {key[:12]}…): preflight {result}."
-        + (" The baseline is broken." if result == "failed" else "")
-    )
-
-
-def _cost_evidence_note(root, run):
-    """Which kind of cost evidence the verdict rests on; unmonitored results stay labelled."""
-    requirement = run.get("cost_evidence")
-    if requirement:
-        return (
-            f"Cost evidence: monitored ({requirement.get('contract')}); every bundle is "
-            f"checked by {requirement.get('validator')}."
-        )
-    modes = set()
-    for path in sorted((root / "cost").glob("*/*.json")):
-        try:
-            modes.add(read_json(path).get("measurement_mode", "unlabelled"))
-        except (HarnessError, OSError, AttributeError):
-            continue
-    if "unlabelled" in modes:
-        return (
-            "Cost evidence: unmonitored, from a harness that did not label its measurement "
-            "mode; it is not monitored evidence."
-        )
-    if modes - {"machine"}:
-        return (
-            f"Cost evidence: {', '.join(sorted(modes))} mode, but this session requires no "
-            "evidence contract, so no monitoring evidence was validated."
-        )
-    return "Cost evidence: machine mode (machine lock and load checks; no monitoring contract)."
 
 
 def _progress_log(root, states):
@@ -250,13 +176,7 @@ def _decide(root, run, states, hashes, by_stage):
     store = Store(run["store"]) if run.get("store") else None
     quality = states["quality"]
     gate_state = quality.get("gate") if quality and quality["status"] == "complete" else None
-    required = ["compile", "quality"]
-    if gate_state in {"improved", "aa"}:
-        required.append("correctness")
-        correctness = states["correctness"]
-        if correctness and correctness["status"] == "complete":
-            if cost_due(root, run, manifest, policy):
-                required.append("cost")
+    required = ["compile", "quality", "benchpress"]
     unit_tests = states["unit-tests"]
     if unit_tests and unit_tests["status"] in {"running", "failed", "complete"}:
         required.append("unit-tests")
@@ -272,50 +192,17 @@ def _decide(root, run, states, hashes, by_stage):
             seen[row["id"]] = stage
             evidence.append(row)
     notes = []
-    preflight_failed = any(
-        r["id"] == "baseline/preflight" and r["result"] == "failed" for r in evidence
-    )
-    # A running quality stage owns this append-only file. Its partial rows are not evidence.
+    # Partial quality observations never count as evidence.
     rows = read_records(root / "observations.jsonl") if _status(quality) == "complete" else []
-    if preflight_failed:
-        keep = {"compile", "correctness"}
-        evidence = [r for r in evidence if seen[r["id"]] in keep or r["kind"] == "harness"]
-        rows = []
-        notes.append(
-            "The baseline failed its correctness preflight: the quality evidence was set aside."
-        )
-    if _status(states["cost"]) == "complete":
-        from qtb.coordinator.costs import replay_costs
-
-        evidence = replay_costs(root, run, manifest, policy, evidence)
-    if (
-        not preflight_failed
-        and _status(quality) == "complete"
-        and _status(states["correctness"]) == "complete"
-    ):
-        clifford = read_records(root / "clifford.jsonl")
-        evidence.append(stage_coverage(run, manifest["cases"], rows, clifford, prefix))
     records, required_ids, summaries = evaluate_quality(manifest, policy, rows, evidence)
-    if "scope" in run:
-        from types import SimpleNamespace
-
-        from qtb.coordinator.costs import required_cost_panels
-
-        panels = required_cost_panels(
-            SimpleNamespace(run=run, manifest=manifest, policy=policy)
-        )
-        required_ids = sorted(set(required_ids) | {f"{prefix}5/{name}" for name in panels})
     if "unit-tests" in required:
         required_ids = sorted(set(required_ids) | {f"{prefix}1/upstream"})
 
     if gate_state == "closed":
         notes.append(
-            "Correctness, unit tests and cost not checked: the quality gate is closed "
+            "Optional unit tests not checked: the quality gate is closed "
             f"({quality.get('gate_reason')})."
         )
-        note = _stored_baseline_note(root, run, policy, states, store)
-        if note:
-            notes.append(note)
     if _status(unit_tests) in {"not started", "skipped"}:
         notes.append("Upstream tests: not run.")
     for stage in STAGE_ORDER:
@@ -325,8 +212,6 @@ def _decide(root, run, states, hashes, by_stage):
                 f"and was discarded ({states[stage].get('reason')}); this is not an observed "
                 "regression."
             )
-    if _status(states["cost"]) == "complete":
-        notes.append(_cost_evidence_note(root, run))
     if pending:
         notes.append(
             "Unfinished required stages: "
@@ -345,8 +230,7 @@ def _decide(root, run, states, hashes, by_stage):
         "test_reports": {
             stage: make_stage_report(
                 root, stage, run, states[stage],
-                [r for r in evidence if r["kind"] == "cost"]
-                if stage == "cost" else by_stage[stage], policy,
+                by_stage[stage], policy,
             ) for stage in REPORT_STAGES
         },
     }

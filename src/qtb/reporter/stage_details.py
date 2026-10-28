@@ -10,8 +10,9 @@ from pathlib import Path
 from qtb.canonical import atomic_bytes, read_json, write_json
 from qtb.coordinator.storage import read_records
 
-STAGES = ("correctness", "unit-tests", "cost")
-TITLES = {"correctness": "Correctness tests", "unit-tests": "Unit tests", "cost": "Cost tests"}
+STAGES = ("benchpress", "unit-tests")
+TITLES = {"correctness": "Correctness tests", "unit-tests": "Unit tests", "cost": "Cost tests",
+          "benchpress": "Benchpress"}
 
 
 def _cell(value):
@@ -120,6 +121,9 @@ def make_stage_report(root, stage, run, state, records, policy=None):
         report["panels"] = [r for r in records if r["kind"] == "cost"]
         report["thresholds"] = (policy or {}).get("cost_thresholds")
         report["measurement_protocol"] = (policy or {}).get("measurement_protocol")
+    elif stage == "benchpress":
+        summary = root / "stages/benchpress/summary.json"
+        report["summary"] = read_json(summary) if summary.exists() else None
     return report
 
 
@@ -236,6 +240,41 @@ def _cost_lines(report):
     return lines
 
 
+def _benchpress_lines(report):
+    summary = report.get("summary")
+    if summary is None:
+        return ["Benchpress details unavailable in the saved evidence.", ""]
+    lines = [
+        f"{summary['panel_size']} circuit/target entries; optimization levels 2 and 3; "
+        f"seeds {_cell(summary['seeds'])}. "
+        f"Complete cases: {summary['complete_cases']}/{summary['expected_cases']}.", "",
+        "Changes are evolved minus baseline; ratios are evolved / baseline. Lower is better. "
+        "Each case uses medians of paired seed measurements. Quality and runtime differences "
+        "are descriptive; no separate Benchpress regression threshold is imposed.", "",
+        "Runtime measures a single pm.run(circuit) call, excluding input loading, pass-manager "
+        "construction and validation. No warmup, calibration or machine-load filtering.", "",
+    ]
+    lines += _table(["Level", "Metric", "Complete cases", "Median change", "Geomean ratio",
+                     "Better", "Equal", "Worse"], (
+        (row["optimization_level"], row["metric"], row["complete_cases"], row["median_change"],
+         row["geometric_mean_ratio"], row["better"], row["equal"], row["worse"])
+        for row in summary["groups"]
+    ))
+    lines += ["<details>", "<summary>Every Benchpress case</summary>", ""]
+    lines += _table(["Case", "Level", "Paired seeds", "Metric", "Baseline", "Evolved",
+                     "Change", "Ratio", "Change %"], (
+        (case["node_id"], case["optimization_level"], case["paired_seeds"], name,
+         value.get("baseline"), value.get("evolved"), value.get("change"), value.get("ratio"),
+         value.get("change_pct"))
+        for case in summary["cases"]
+        for name, value in (case["metrics"] or {"incomplete": {}}).items()
+    ))
+    lines += ["</details>", "", "Invocation outcomes: " + _cell(summary["invocation_counts"])
+              + ". Raw records: stages/benchpress/raw/; paired records: stages/benchpress/pairs/.",
+              ""]
+    return lines
+
+
 def render_stage_details(report):
     stage = report["stage"]
     lines = [f"## {TITLES[stage]}", "", f"Stage: **{report['status']}**.", ""]
@@ -248,7 +287,7 @@ def render_stage_details(report):
         for r in report["constraints"]
     ))
     lines += {"correctness": _correctness_lines, "unit-tests": _unit_lines,
-              "cost": _cost_lines}[stage](report)
+              "cost": _cost_lines, "benchpress": _benchpress_lines}[stage](report)
     return lines
 
 

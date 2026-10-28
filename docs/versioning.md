@@ -1,5 +1,13 @@
 # Format, profile, and compatibility rules
 
+Current profiles are confirm version 14 and iterations version 11. They remove standalone
+correctness/cost requirements, add full-quality runtime completeness and Benchpress, and
+restrict confirm to L2/L3 with recomputed hierarchical weights. Start a new session for
+these changes; archived sessions retain their original harness and profile.
+
+The monitor, cost-stage and earlier profile sections below describe historical contracts.
+Current timing does not use load checks, monitor contracts, noise retries or cost guards.
+
 [Documentation index](README.md)
 
 Canonical circuit/target artifacts, worker/verifier protocols, manifests, policies,

@@ -111,17 +111,10 @@ def load_profile(name, root=None, verify=True):
         raise HarnessError("Confirm requires all eight scored families")
     if len(policy["required_ids"]) != len(set(policy["required_ids"])):
         raise HarnessError("Duplicate required constraint ID")
-    # A cost panel without cases is never measured, so a required ID naming it could only
-    # stay unresolved: the required IDs and the panel lists must agree.
-    prefix = "CA" if name == "confirm-profile" else "IA"
-    panels = {c.get("panel") for c in cases}
-    empty = [
-        id_
-        for id_ in policy["required_ids"]
-        if id_.startswith(f"{prefix}5/") and id_.split("/", 1)[1] not in panels
-    ]
-    if empty:
-        raise HarnessError(f"Required cost panels without cases: {', '.join(empty)}")
+    if name == "confirm-profile" and manifest["version"] >= 14 and any(
+        c["optimization_level"] not in {2, 3} for c in cases
+    ):
+        raise HarnessError("Confirm quality cases must use optimization level 2 or 3")
     if verify:
         checked = set()
         for case in cases:

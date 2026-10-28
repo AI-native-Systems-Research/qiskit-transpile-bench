@@ -2,93 +2,82 @@
 
 [Documentation index](../README.md) · [LSF session guide](../cluster.md)
 
-The primary way to run a comparison is an LSF session: one launcher command, and a manager
-job runs every stage below on suitable hosts ([LSF session guide](../cluster.md)). This page
-is the secondary workflow: running each stage yourself, for local work, debugging and
-replaying a decision. The stages, their files and their rules are the same either way.
+Run each stage against one session directory for local work, debugging and replay.
+The [LSF launcher](../cluster.md) runs the same stages through a manager job.
 
-## The manual sequence
+## Manual sequence
 
 ```bash
 uv sync --all-extras
-mkdir -p "$HOME/qtb-store"             # the baseline store; it must exist before compile
-export QTB_STORE="$HOME/qtb-store"      # or pass --store DIR to compile
-S="$HOME/qtb-sessions/idea1"            # choose a session path that does not exist yet
+mkdir -p "$HOME/qtb-store" "$HOME/qtb-sessions"
+export QTB_STORE="$HOME/qtb-store"
+S="$HOME/qtb-sessions/idea1"  # choose a new session path
 
 uv run qiskit-transpile-bench compile \
-  --baseline /path/to/baseline --evolved /path/to/evolved --results-root "$S"
-uv run qiskit-transpile-bench quality     --results-root "$S"
-uv run qiskit-transpile-bench correctness --results-root "$S"      # skipped unless the quality gate is open
-uv run qiskit-transpile-bench unit-tests  --results-root "$S"      # optional; skipped unless the gate is open
-uv run qiskit-transpile-bench cost        --results-root "$S"      # skipped if correctness found a failure
-uv run qiskit-transpile-bench decide      --results-root "$S"      # writes the verdict, then cleans the session
+  --baseline /path/to/baseline --evolved /path/to/evolved \
+  --profile confirm-profile --results-root "$S"
+uv run qiskit-transpile-bench quality    --results-root "$S"
+uv run qiskit-transpile-bench benchpress --results-root "$S"
+uv run qiskit-transpile-bench unit-tests --results-root "$S"  # optional
+uv run qiskit-transpile-bench decide     --results-root "$S"
 ```
 
-Add `--profile confirm-profile` to `compile` for the confirm profile. The later stages read
-the profile and the store from the session. Your source folders are never modified. `uv
-run` runs the CLI in this project's uv environment.
+The default profile is `iterations-profile`; use `confirm-profile` for confirmation.
+Later stages read the profile, sources and store from the session. Source folders
+are never modified. Confirm quality and Benchpress run only at optimization levels
+2 and 3.
 
-Each stage exits 0 when it completed or was skipped, so the stages up to `decide` can be
-joined with `&&`. `correctness` and `unit-tests` can run at the same time, in two shells or
-on two hosts. `decide` exits with the verdict's code, then cleans the session's bulk unless
-a safety check refuses ([clean](clean.md)); a cleanup problem is reported separately and
-never changes that code.
+Quality includes fresh paired runtime measurements over its full panel, alongside
+circuit depth/count and output checks. Benchpress adds the referenced upstream
+transpilation panel. Both compare baseline and evolved wall-clock transpilation
+runtime. Run them sequentially on an idle machine; no host-load checks or
+corrections are applied.
 
-A direct `cost` measures in **machine mode**: it holds the per-user machine lock and waits
-for the host's load to fall, so run it on an otherwise idle machine. A session launched on
-LSF requires monitored cost evidence, and its `cost` stage runs only through the LSF job
-entry point ([cost](cost.md#measurement-modes)).
+## Commands
 
-## The seven stages
+| Command | Purpose |
+| --- | --- |
+| [compile](compile.md) | Snapshot sources, reuse/build baseline, build evolved and verifier, round-trip inputs |
+| [quality](quality.md) | Measure circuit depth/count and runtime, check outputs, audit determinism, compute quality gate |
+| benchpress | Compare the upstream Benchpress panel at L2/L3, with its own report |
+| [unit-tests](unit-tests.md) | Optional upstream Python/Rust suites; once started they bind the verdict |
+| [decide](decide.md) | Merge committed evidence into the verdict and reports, then clean when safe |
+| [clean](clean.md) | Remove session bulk while preserving results |
 
-| Step | Command guide | Purpose |
-| --- | --- | --- |
-| 1 | [compile](compile.md) | Snapshot sources, reuse/build the baseline, build the evolved revision and verifier, round-trip the inputs |
-| 2 | [quality](quality.md) | Measure circuit depth/count, check outputs, audit determinism and compute the gate |
-| 3 | [correctness](correctness.md) | C1–C5, API contracts and C7; baseline preflight first |
-| 4 | [unit-tests](unit-tests.md) | Optional upstream Python/Rust suites; once started they bind the verdict |
-| 5 | [cost](cost.md) | Fresh timing and memory panels on quiet cores |
-| 6 | [decide](decide.md) | Merge committed evidence into `decision.json` and `report.md` |
-| 7 | [clean](clean.md) | Remove this session's bulk while keeping results; runs after `decide` by default |
+A finished stage never runs again. Interrupted or failed stages can resume when
+called again, subject to the [session rules](../sessions.md).
 
-Each command runs one step against one session directory. The baseline store is shared
-across sessions; the evolved build and measurements belong to one session. A finished stage
-never runs again; an interrupted, failed or noisy one resumes when called again
-([session rules](../sessions.md)).
-
-## Dependencies and the gate
+## Dependencies and gate
 
 ```mermaid
 flowchart TD
     compile --> quality
-    quality -->|closed| decide
-    quality -->|improved or aa| correctness
-    quality -->|improved or aa| unit[unit-tests: optional]
-    correctness --> cost
-    cost --> decide
+    compile --> benchpress[Benchpress L2/L3]
+    quality -->|improved or identical builds| unit[unit-tests: optional]
+    quality --> decide
+    benchpress --> decide
     unit --> decide
-    decide --> clean[clean: after decide, unless unsafe]
+    decide --> clean[clean when safe]
 ```
 
-The flow is `compile → quality → gate`. An improvement with every quality check passing
-opens the gate; identical builds also proceed as an A/A harness check. Otherwise the later
-measurement stages record `skipped`. **A closed-gate `NO_IMPROVEMENT` does not establish
-semantic correctness or cost safety.** See [the gate](quality.md#the-quality-gate).
+Quality and Benchpress require completed compilation. Benchpress runs independently
+of the quality gate, even when quality finds no improvement. Optional unit tests
+require completed quality and record `skipped` if its gate closes. Identical builds
+open the gate for an A/A check.
 
-`correctness` and optional `unit-tests` can run in parallel. `cost` waits for correctness to
-finish without a failed record. `decide` can run any time after the session exists;
-unfinished required stages keep the verdict `INCONCLUSIVE`, and a stage crash gives `ERROR`.
+Each stage exits 0 when complete or skipped. `decide` may run any time after the
+session exists; missing required evidence prevents a conclusive pass and a stage
+crash gives `ERROR`. It writes the verdict and cleans session bulk when safe.
+Cleanup issues are reported separately without changing the verdict's exit code.
 
-## Stage exits
+## Exit codes
 
-| Exit | Meaning |
+| Stage exit | Meaning |
 | ---: | --- |
-| 0 | Complete or skipped (also when it already was) |
-| 40 | The stage failed; `decide` gives `ERROR` |
-| 41 | A precondition is not met; nothing was changed |
-| 42 | `cost` detected interference on its measurement core and ended `noisy`; run it again |
-| 64 | Usage error |
+| 0 | Complete or skipped, including a previously finished stage |
+| 40 | Stage failed |
+| 41 | Unmet precondition |
+| 64 | Invalid usage |
 
-`decide` exits with the verdict: 0 `PASS`, 10 `NO_IMPROVEMENT`, 20 `CONSTRAINT_VIOLATION`,
-30 `INCONCLUSIVE`, 40 `ERROR` ([decide](decide.md#reading-the-verdict)). The full rules are
-in [session rules](../sessions.md#exit-codes-of-the-stages).
+`decide` returns 0 `PASS`, 10 `NO_IMPROVEMENT`, 20 `CONSTRAINT_VIOLATION`,
+30 `INCONCLUSIVE` or 40 `ERROR` ([decision guide](decide.md)).

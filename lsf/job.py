@@ -1,17 +1,4 @@
-"""Entry point of every stage job the manager submits: ``python -P -m lsf.job``.
-
-It translates the LSF allocation into the harness's execution context (``lsf.context``),
-installs what the stage needs and runs exactly one harness command:
-
-- ``compile`` records the session's cost-evidence requirement (``lsf.cost_evidence``);
-- ``cost`` installs the cost monitor (``lsf.cost_monitor``) with this attempt's identity;
-- every stage records the job's identity as its invocation, which the manager checks
-  before it trusts a stage outcome.
-
-It then writes ``outcomes/<job key>.json`` (the exit status and the committed stage state)
-and exits with the harness's status. A termination signal kills the stage's worker process
-groups too, since they run in sessions of their own.
-"""
+"""Run one harness stage in its LSF allocation and record a durable outcome."""
 
 import argparse
 import os
@@ -32,7 +19,7 @@ from lsf.scheduler import slots
 
 OUTCOME_FORMAT = "qtb-lsf-outcome/1"
 EXIT_ERROR, EXIT_PRECONDITION = 40, 41
-STAGES = ("compile", "quality", "correctness", "unit-tests", "cost", "clean")
+STAGES = ("compile", "quality", "benchpress", "unit-tests", "clean")
 SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP", "SIGUSR2", "SIGXCPU")
 
 
@@ -120,40 +107,8 @@ def _state(session, stage):
     return {key: state.get(key) for key in keep if key in state}
 
 
-def _monitor(session, key):
-    """Where a cost invocation's placement and pre-flight evidence are, for the ledger."""
-    path = session / "cost" / "monitor" / key / "preflight.json"
-    try:
-        preflight = read_json(path)
-    except (HarnessError, OSError):
-        return None
-    return {
-        "preflight": str(path),
-        "machine": preflight.get("machine"),
-        "layout": {k: (preflight.get("layout") or {}).get(k) for k in ("monitor", "worker")},
-        "tier": preflight.get("tier"),
-        "idle_probe": preflight.get("idle_probe"),
-    }
-
-
 def _execution(stage, context, launch, invocation, session, probe):
-    if stage == "cost":
-        from lsf.cost_monitor import CostMonitor
-
-        monitor = CostMonitor(
-            context,
-            tier=launch["tier"],
-            attempt=invocation,
-            diagnostics=session / "cost" / "monitor" / invocation["job_key"],
-            probe=probe,
-        )
-        return execution_for(context, invocation=invocation, cost_monitor=monitor)
-    extensions = {}
-    if stage == "compile":
-        from lsf.cost_evidence import requirement
-
-        extensions["session"] = {"cost_evidence": requirement(launch["tier"])}
-    return execution_for(context, invocation=invocation, workers=context["slots"], **extensions)
+    return execution_for(context, invocation=invocation, workers=context["slots"])
 
 
 def run(args, environ=None, probe=None):
@@ -234,9 +189,6 @@ def main(argv=None, environ=None, probe=None):
         "message": message,
         "terminated": terminated,
         "state": _state(Path(launch["session"]), args.stage),
-        "monitor": _monitor(Path(launch["session"]), args.job_key)
-        if args.stage == "cost"
-        else None,
         "host": log.bound().get("host"),
         "job_id": environ.get("LSB_JOBID"),
         "started_at": started,

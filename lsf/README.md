@@ -1,62 +1,106 @@
-# `lsf/`: LSF orchestration and the monitored cost job
+# Running a benchmark session on LSF
 
-User guide: [docs/cluster.md](../docs/cluster.md). This page is for developers.
+The launcher submits one manager job. The manager runs `compile`, `quality`,
+`benchpress`, optional `unit-tests`, then `decide` and cleanup. Quality measures
+baseline/evolved transpilation runtime across its full panel. The confirm quality
+panel and Benchpress both use optimization levels 2 and 3.
 
-The harness (`src/qtb`) executes one stage invocation and reports its outcome. Everything
-specific to LSF lives here: no `LSB_*`/`LSF_*` parsing, LSF command or resource string is
-left in `src/qtb`, and no retry policy either.
+Quality and Benchpress run sequentially. Timings assume an idle machine: no load
+probe, contamination threshold, quiet-host selector or automatic timing retry is
+used. Select an appropriate queue for the machine where you intend to measure.
+Every job requests 16 slots on one host; worker subprocesses retain the harness's
+serial Qiskit settings.
 
-## Entry points
+## Launch
 
-| Command | Runs where | Does |
-| --- | --- | --- |
-| `python lsf/submit.py` | login node | validates the configuration, writes `<session>.lsf/launch.json` and the ledger, submits the manager |
-| `python lsf/submit.py --resume [--upgrade-cost --reason ...]` | login node | continues an ended session's unfinished stages under a new manager, in a new ledger epoch; `--upgrade-cost` first re-pins an unfinished cost stage to the current harness ([resume](../docs/cluster.md#resume-a-session)) |
-| `python -P -m lsf.manager --lsf-dir D` | manager job | the pipeline: stage jobs, cost retries, inline `decide`, the clean job |
-| `python -P -m lsf.job --lsf-dir D --job-key K --stage S [--attempt N]` | each stage job | allocation → execution context, installs the monitor, runs one harness command, writes `outcomes/K.json` |
-| `python -m lsf.control status\|stop\|reap --results-root S` | login node | watch, stop, recover |
+Install the harness and its dependencies on a shared filesystem visible at the
+same path from every node. The baseline store and session's parent directory must
+already exist. Each launch needs a new session directory; `compile` creates it.
 
-## Modules
+```sh
+mkdir -p qtb-store qtb-sessions
+uv run python lsf/submit.py \
+  --store "$PWD/qtb-store" \
+  --results-root "$PWD/qtb-sessions/comparison-001" \
+  --baseline /shared/qiskit-main \
+  --evolved /shared/qiskit-evolved \
+  --profile confirm-profile \
+  --queue normal \
+  --unit-tests
+```
 
-| Module | Responsibility | In the harness identity |
-| --- | --- | --- |
-| `context.py` | LSF environment → validated execution context; allocation checks | measurement-facing |
-| `cost_monitor.py` | topology and placement, idle probe, counters, check A, thresholds, contamination | measurement-facing |
-| `cost_evidence.py` | admission of monitored bundles (reuse, stage, `decide`, replay after cleanup) | measurement-facing |
-| `retry.py` | ledger, attempt accounting, `MAX_COST_RETRIES = 20`, exhaustion | yes |
-| `scheduler.py` | `bsub`/`bjobs`/`bhist`/`bkill`, resource requests, response parsing | yes |
-| `manager.py`, `job.py`, `submit.py`, `control.py`, `report.py`, `logging.py` | orchestration, entry points, reports, logs | yes |
+`--unit-tests` is optional and defaults to false. These tests run only when the
+quality gate opens. Benchpress depends on compilation and runs even when the
+quality gate closes or quality fails, providing its own comparison report.
 
-The whole package (not `tests/`) is part of `implementation_identity()` and the archived
-harness wheel, so a session pins it. The three measurement-facing modules also form
-`measurement_identity()`, which every monitored bundle records and `run.json:cost_evidence`
-freezes.
+`QTB_STORE` and `QTB_SESSION` supply defaults for `--store` and `--results-root`.
+Explicit options take precedence. Run `uv run python lsf/submit.py --help` for all
+options. A successful launch means LSF accepted the manager, not that the benchmark
+has finished.
 
-## Harness interfaces used
+## Resources
 
-- `qtb.execution.Execution`: `scheduler`, `workers`, `invocation`, `session` (compile records
-  `cost_evidence`), `cost_monitor`, `cleanup`.
-- Worker lifecycle hooks in `qtb.coordinator.process.run_worker`: `spawn_options`,
-  `launched`, `progress` (may return an exception: abort before commit), `exited` (before
-  reaping, via `waitid(WNOWAIT)`), `reaped`.
-- `qtb.errors.Contaminated`: ends a stage `noisy` with exit 42; never recorded as
-  unresolved evidence.
-- `qtb.extensions`: the session's required evidence validator, `lsf.cost_evidence:validate`.
-- `qtb.coordinator.clean.after_decide(..., cleanup=...)`: the manager submits `clean` as a job.
+Use `--queue` for the common queue, or `--<job>-queue` for one job. Each job also
+accepts `--<job>-mem-gb` and `--<job>-wall`; walls use LSF `[hours:]minutes` syntax.
+Memory requests are in GB, matching the site's `LSF_UNIT_FOR_LIMITS` setting.
 
-## Tests
+| Job | Slots | Memory (GB) | Wall limit |
+| --- | ---: | ---: | --- |
+| compile | 16 | 64 | 6:00 |
+| quality | 16 | 32 | 12:00 |
+| benchpress | 16 | 32 | 12:00 |
+| unit-tests | 16 | 32 | 10:00 |
+| clean | 16 | 4 | 1:00 |
+| manager | 16 | 4 | 168:00 |
 
-`lsf/tests/` runs with `uv run pytest`. A synthetic probe replaces `/proc` and `/sys` (with a
-virtual clock), and `FakeScheduler` replaces LSF: it runs every job in-process through the
-real `lsf.job` entry point over the fake stage work of `tests/stage_world.py`. Nothing is
-submitted. `LinuxProbe` parsing is tested against a fake `/proc` tree; the real Linux path
-(placement, `waitid`, counters) needs a Linux host.
+The manager's wall limit must exceed every stage limit. Pending time counts toward
+its internal deadline, which reserves time for cancellation before LSF's wall
+limit. A stage that cannot fit the remaining time is not submitted. Site queue
+limits may require overriding these defaults.
 
-## Formats
+## Reports and logs
 
-`launch.json` (`qtb-lsf-launch/1`), `ledger.json` (`qtb-lsf-ledger/1`), `outcomes/*.json`
-(`qtb-lsf-outcome/1`), `report.json` (`qtb-lsf-report/1`), the execution context
-(`qtb-lsf-context/1`), and monitoring evidence in cost bundles
-(`qtb-lsf-monitor-evidence/1`, contract `qtb-lsf-monitor/4`). See
-[output formats](../docs/output-format.md#lsf-orchestration-records) and
-[versioning](../docs/versioning.md).
+The session contains the benchmark's `report.md`, `report.json`, `decision.json`,
+and each stage's evidence and reports. The sibling `<session>.lsf/` directory
+contains `launch.json`, `ledger.json`, the orchestration report, and job outcomes.
+Logs live below `<session>.lsf/logs/<run-id>/`: each launcher, manager invocation
+and stage job has separate readable `.log` and structured `.events.jsonl` files.
+LSF stdout/stderr and large scheduler responses are retained there too.
+
+Set `--log-level DEBUG` (or `LSF_LOG_LEVEL=DEBUG`) to include unchanged scheduler
+polls. INFO includes stage transitions, submissions, decisions and errors.
+Orchestration records live outside the session and survive cleanup.
+
+```sh
+uv run python -m lsf.control status --results-root /shared/session
+uv run python -m lsf.control stop --results-root /shared/session
+uv run python -m lsf.control reap --results-root /shared/session
+```
+
+`stop` cancels the manager, which cancels its owned stage jobs. Use `reap` after a
+manager dies without handling a signal. Both verify each job's identity before
+cancelling it. `reap` refuses while a manager holds the orchestration lock.
+
+## Resume and recovery
+
+```sh
+uv run python lsf/submit.py --resume --results-root /shared/session
+```
+
+Resume requires the earlier manager and all its jobs to have ended. It preserves
+the recorded sources, store, profile and resource configuration, starts a new
+ledger epoch, and permits one new job per unfinished stage. Completed or skipped
+stages never run again. A cleaned session cannot be resumed; its verdict can still
+be replayed with `qiskit-transpile-bench decide`.
+
+The unfinished stages must use the harness identity pinned by the session. Resume
+with its archived harness wheel when necessary. A requeued manager first reconciles
+the ledger and adopts active jobs, preventing duplicate work after a host failure.
+A stage outcome is trusted only when scheduler status, outcome record and committed
+stage state agree on the invocation.
+
+`decide` always runs after the available stages, including after a failed stage.
+Cleanup is submitted only when the harness determines the session is safe to clean.
+The manager exits with the decision's status: 0 PASS, 10 NO_IMPROVEMENT, 20 CONSTRAINT_VIOLATION,
+30 INCONCLUSIVE or 40 ERROR. Stage exit codes describe execution, not benchmark
+verdicts: 0 complete/skipped, 40 failed, 41 unmet precondition and 64 usage.

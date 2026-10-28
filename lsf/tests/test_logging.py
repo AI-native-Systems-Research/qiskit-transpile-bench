@@ -75,7 +75,6 @@ def test_manager_logs_show_decisions_at_info_and_every_poll_at_debug(world, tmp_
         "submit.accepted",
         "poll.transition",
         "stage.outcome",
-        "retry.decision",
         "decide.verdict",
         "cleanup.complete",
     ):
@@ -88,16 +87,15 @@ def test_manager_logs_show_decisions_at_info_and_every_poll_at_debug(world, tmp_
     started = next(
         e for e in events(logs / "manager-1.events.jsonl") if e["event"] == "manager.started"
     )
-    assert started["retry_budget"] == {"retries": 20, "jobs": 21}
-    assert started["resources"]["cost"]["slots"] == 9
+    assert "retry_budget" not in started
+    assert started["resources"]["benchpress"]["slots"] == 16
     pending = [
         e for e in events(logs / "manager-1.events.jsonl") if e["event"] == "poll.transition"
     ]
     assert any(e["state"] == "PEND" and e["pending_reason"] for e in pending)
-    job_events = events(next((logs / "jobs").glob("job-cost-a01-*.events.jsonl")))
-    assert {e.get("attempt") for e in job_events[1:]} == {1}  # all but logging.started
-    assert any(e["event"] == "monitor.idle_probe" for e in job_events)
-    assert ("monitor.window" in {e["event"] for e in job_events}) is False  # no worker ran
+    job_events = events(next((logs / "jobs").glob("job-benchpress-*.events.jsonl")))
+    assert any(e["event"] == "job.finished" for e in job_events)
+    assert not any(e["event"].startswith("monitor.") for e in job_events)
     # The logs are outside the session: its cleanup keeps them.
     assert (session / "clean.json").exists() and (logs / "manager-1.log").exists()
 

@@ -165,14 +165,7 @@
       },
       "required": [
         "quality_batch_size",
-        "warmups",
-        "minimum_calls",
-        "minimum_ns",
-        "screen_rounds",
-        "timing_rounds",
-        "companion_rounds",
-        "memory_processes",
-        "rerun_multiplier"
+        "warmups"
       ]
     },
     "cost_thresholds": {
@@ -293,7 +286,6 @@
     "improvement_multiplier",
     "guard_multiplier",
     "measurement_protocol",
-    "cost_thresholds",
     "upstream_test_budgets_s",
     "bootstrap_replicates",
     "rng_seed",

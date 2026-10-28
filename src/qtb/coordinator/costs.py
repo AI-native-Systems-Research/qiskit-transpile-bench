@@ -147,8 +147,16 @@ def interleaving_seed(run_id, cases, estimator, count, arms):
     )
 
 
+def _max_load():
+    """Highest one-minute load average allowed; ``QTB_COST_MAX_LOAD`` overrides half the CPUs."""
+    value = os.environ.get("QTB_COST_MAX_LOAD")
+    if value:
+        return float(value)
+    return max(1.0, (os.cpu_count() or 1) * 0.5)
+
+
 def _too_busy():
-    return os.getloadavg()[0] > max(1.0, (os.cpu_count() or 1) * 0.5)
+    return os.getloadavg()[0] > _max_load()
 
 
 def _wait_until_quiet(timeout_s=300, poll_s=10):
@@ -156,7 +164,10 @@ def _wait_until_quiet(timeout_s=300, poll_s=10):
     deadline = time.monotonic() + timeout_s
     while _too_busy():
         if time.monotonic() >= deadline:
-            raise Incomplete("Machine is too busy for cost measurement")
+            raise Incomplete(
+                f"Machine is too busy for cost measurement "
+                f"(load {os.getloadavg()[0]:.1f} > {_max_load():g})"
+            )
         time.sleep(poll_s)
 
 

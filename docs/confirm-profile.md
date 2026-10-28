@@ -1,285 +1,41 @@
-# The confirm profile
+# Confirm profile
 
-[Documentation index](README.md)
+[Documentation index](README.md) · [Workflow](workflow/README.md)
 
-`confirm-profile` is the **broad check**. Run it once, when a change looks good on the
-[iterations profile](iterations-profile.md), to find out whether the gain holds beyond the
-three circuits you tuned on.
+`confirm-profile`, version 14, has 109 quality cases and
+7,390 B0 seeds per revision.
+Every case runs at optimization level 2 or 3. There are 31 scored L2 cases and 30
+scored L3 cases across eight families. Use `--profile confirm-profile` when compiling a
+new session. The workload is public; reserve it for confirmation after iteration.
 
-```bash
-Q="uv run qiskit-transpile-bench"
-S="$HOME/qtb-sessions/idea1-confirm"   # a new session directory
+| Role | Cases |
+| --- | ---: |
+| scored | 61 |
+| zero_baseline | 4 |
+| deterministic | 30 |
+| guard | 10 |
+| canary | 4 |
 
-$Q compile     --baseline /path/to/baseline --evolved /path/to/evolved \
-               --profile confirm-profile --store "$HOME/qtb-store" --results-root "$S"
-$Q quality     --results-root "$S"
-$Q correctness --results-root "$S"      # skipped unless the quality gate is open
-$Q unit-tests  --results-root "$S"      # optional; if you run it, it counts
-$Q cost        --results-root "$S"      # skipped unless correctness also passed
-$Q decide      --results-root "$S"
-```
+Quality measures native two-qubit depth and count, checks output legality and routing
+replay, audits determinism, and times every case/seed pair using fresh uninstrumented
+calls for both revisions. Runtime reports show seconds, differences and ratios. There
+are no separate timing/memory panels and no host-load checks.
 
-The profile is chosen once, on `compile`; the later stages read it from the session. See the
-[README](../README.md) for the stages, the store and the exit codes.
+Scored weights sum to one. Weights split equally by family, then optimization level,
+size band, topology, native basis, input group and variant. Removing L0/L1 from confirm
+recalculates weights over the retained cases; each family still carries one eighth.
 
-Files: `profiles/confirm-profile/manifest.json` and `profiles/confirm-profile/policy.json`.
-Version 13 ([what changed](#version-13)).
+The quality gate uses D2 improvement, N2/basis guards, per-case caps, exact-case checks,
+C0/C6, determinism and completeness. Confirm also requires breadth across families and
+uses a practical 1% D2 improvement threshold. Confirm family/level guards allow 5% plus
+seed uncertainty, individual guards 15% plus uncertainty, ordinary deterministic cases
+25%; zero-baseline and canary checks remain strict. The frozen policy is authoritative.
 
-> **Do not tune on this profile.** The workload is public and fixed, with no held-back part.
-> Editing a candidate and rerunning confirm until it passes turns it into a second tuning
-> loop. The harness does not count how often a workload has been decided, so keeping to
-> this is up to you.
+`quality/runtime` requires complete paired runtime observations. Runtime regression is
+reported descriptively. `benchpress/completeness` requires the independent Benchpress
+panel to finish; its D2/N2/runtime changes are also descriptive. Optional upstream tests
+count in the final verdict once started. C1–C5, C7 and the old cost requirements are removed.
 
-## What a `PASS` claims
-
-Native two-qubit depth improved across eight circuit families, optimization levels 0–3,
-heavy-hex and grid-class targets, and the `cx` and `cz` bases (`ecr` guarded), on the fixed
-workload drawn from Qiskit's in-tree benchmark suite (`test/benchmarks/`), within the gate
-count, compile time, memory and correctness limits. It says nothing about circuits outside
-this workload.
-
-## Workload: 248 cases
-
-| Role | Count | Purpose |
-| --- | ---: | --- |
-| Scored | 130 | 38 input groups × levels × targets; 100 seeds each; weights sum to 1 |
-| Guard | 19 | Per-case regression guards, including the `cx`/`ecr` basis guards of the three 100-qubit circuits |
-| Deterministic | 51 | Seed-blind cases compared seed by seed; each metric may increase by at most 25% |
-| Zero-baseline | 4 | Cases whose baseline `D2` = `N2` = 0; any non-zero value fails |
-| Canary | 5 | Constant cases that must equal a frozen value |
-| Timing | 30 | T1–T19 and the preset panel from the iterations profile, plus an 8-case confirm timing panel |
-| Memory | 9 | Peak RSS of one compile in a fresh process |
-
-Quality work per revision is about 15,400 compiles.
-
-### Families
-
-Every family carries exactly 1/8 of the score.
-
-| ID | Family | Scored input groups |
-| --- | --- | --- |
-| G1 | Quantum Fourier transform | `qft_n100`, `qft_full_n32`, `qft_full_n64`, `qft_cp_n8`, `qft_cp_n14` |
-| G2 | Hamiltonian simulation | `square_heisenberg_n100`, `dtc_n100`, `trotter_chain_n16`, `trotter_chain_n32` |
-| G3 | QAOA | `qaoa_ba_n100_3reps`, `qaoa_complete_n8`, `qaoa_complete_n16`, `qaoa_complete_n32` |
-| G4 | Quantum volume | `qv_n50_d50`, `qv_n50_d20`, `qv_n27_d27`, `qv_n14_d14`, `qv_n14_d14_s10` |
-| G5 | Reversible logic and arithmetic | `ripple_adder_10`, `ripple_adder_20`, `multiplier_h18_n16`, `multiplier_h18_n32`, `adder_modular_v17_n8/n16/n32`, `mcx_kg24_n5/n6/n16` |
-| G6 | Bernstein–Vazirani | `bv_all_ones_n16`, `bv_all_ones_n50`, `bv_all_ones_n100` |
-| G7 | Variational ansatz | `su2_circular_n89`, `su2_circular_n100`, `ring_random_n8`, `ring_random_n14` |
-| G8 | Routing challenges (QUEKO) | `queko_bigd_20`, `queko_bss_53`, `queko_bntf_54`, with explicit SABRE layout and routing |
-
-Six RevLib/HWB inputs from the original design had unclear redistribution terms. They were
-replaced by generated reversible circuits from Qiskit's `test/benchmarks/utils.py`; the manifest
-records the substitutions under `replacements`. See [fixture provenance](../fixtures/PROVENANCE.md).
-
-### Coverage dimensions
-
-| Dimension | Values in the scored panel |
-| --- | --- |
-| Optimization level | 0 (38 cases), 1 (31), 2 (31), 3 (30) |
-| Size band (logical qubits) | small 4–16 (56), medium 17–64 (53), large 65–100 (21) |
-| Topology | heavy-hex (100), grid (30) |
-| Native 2-qubit basis | `cx` (101), `cz` (29) |
-| Constraint form | frozen `Target` (67), loose basis list + coupling map (63) |
-| Targets | `mumbai_27`, `heavy_hex_d9_cz`, `rochester_53`, `melbourne_14_u`, `mumbai_27_loose`, `melbourne_14` (directed), `rochester_53_u`, `grid_5x5_u`, `grid_7x7_u`, `tokyo_20`, `sycamore_54` |
-
-Inputs whose interaction graph is a path or ring (Trotter chains, DTC, random rings, circular
-SU2 at 100 qubits) embed perfectly at levels 1–3, so every seed gives the same result there.
-They are scored at level 0 only and are deterministic guards at levels 1–3. So is
-`mcx_kg24_n5`, which gives `D2` 14 and `N2` 15 on every seed at levels 1–3.
-
-### Weights
-
-The weights form a tree. Each family gets 1/8. Inside a family, weight is split equally by
-level, then size band, then topology, then basis, then input group, then variant. Adding more
-inputs to one family therefore cannot outweigh the other seven. Two consequences are stated
-openly: `square_heisenberg_n100` carries about 9.9% of the score and `su2_circular_n89` about
-9.4%, because each is the only seed-sensitive input of its family at some levels. The
-iterations profile's three circuits together carry 18.2%.
-
-### Guard-only and exact cases
-
-- **Deterministic** (51): QUEKO with default methods (VF2 finds the perfect embedding), the
-  path- and ring-shaped inputs and `mcx_kg24_n5` at levels 1–3, and six all-to-all Clifford +
-  `rz` controls (`a2a_*` on `a2a_clifford_rz_16`). Compared exactly on 10 seeds.
-- **Zero-baseline** (4): `bvlike_n100` and `qft16_cancel` at levels 2–3, where every
-  entangling gate cancels.
-- **Guards** (19): the three 100-qubit circuits on `cx`/`ecr`, `su2_circular_n89` at level 3
-  (10 seeds), `multiplier_h18_n20` (100 seeds, the `hwb12` replacement), QUEKO at level 0,
-  and others. Every guard must stay at or below the 2.0 per-case cap. Guards outside the
-  basis panels must also satisfy `ln(ratio) ≤ 3·SE_case`.
-- **Canaries** (5): `su2_circular_n100` and `long_2q_sequence` at several levels.
-
-### Cost panels
-
-| Panel | Cases | Mode |
-| --- | --- | --- |
-| `timing` | T1–T19, unchanged from the iterations profile | `timing_e2e` / `timing_reuse` |
-| `preset` | Preset construction on the three heavy-hex targets | `preset_build` |
-| `confirm-timing` | 8 cases, one large end-to-end case per family: `qft_n100` L3, `square_heisenberg_n100` L0, `qaoa_ba_n100_3reps` L3, `qv_n50_d50` L2, `multiplier_h18_n32` L0, `bv_all_ones_n100` L3, `queko_bss_53` L2, `su2_circular_n89` L0 | `timing_e2e`, seed 0 |
-| `memory` | 9 cases, the heaviest scored input of each family plus `multiplier_h18_n20` at level 2; 3 fresh processes each | `memory` |
-| `companion` | The level-2 scored case of `companion_groups`: `square_heisenberg_n100` (G2), `multiplier_h18_n32` (G5), `bv_all_ones_n100` (G6), `queko_bss_53` (G8), over `companion_seeds` 0–9 (only when layout or routing changed) | `timing_reuse` |
-
-The confirm-timing and companion selections are provisional: the companion now samples four
-families instead of eight, and confirm-timing one case per family instead of 20. Both must be
-validated on the cost host (A/A noise, and a layout/routing slowdown in a retained and an
-omitted family) before they are frozen (design/updated_confirm_plan.md, section 6 and V6).
-
-## Acceptance rules (CA1–CA6)
-
-The broad rules replace the iterations rules. A confirm `PASS` does **not** also require the
-three-circuit iterations score to improve.
-
-| Rule | Records | Requirement |
-| --- | --- | --- |
-| CA1 correctness | `CA1/C0`, `CA1/C1-C5`, `CA1/C6`, `CA1/C7`, and `CA1/upstream` once `unit-tests` has started | As IA1, with C7 on 5 seeds (`clifford_seeds`) in prefix and full mode. Quality performs C0 and C6; semantic fixture checks run in the correctness stage. Unlike IA1, stage coverage is report-only: uncovered scored cases do not block a pass. |
-| CA2 improvement | `CA2/improvement` | `ln(D2 score) + 2·SE < ln(0.99)`, a practical 1% reduction beyond seed noise |
-| CA3 breadth | `CA3/breadth` | At least 4 of the 8 families individually satisfy `ln(D2) + 2·SE < 0`, **and** removing any one family still leaves the score below 1 |
-| CA4 guards | `CA3/primary/N2`, `CA3/cx/*`, `CA3/ecr/*`, `CA4/family/<G>/<metric>`, `CA4/optimization_level/<L>/<metric>`, `CA4/cap/...`, `CA4/exact/...` | Family and level `D2`/`N2`: `ln(score) ≤ ln(1.05) + 3·SE`. Overall `N2` and basis panels retain zero margin. Individual guard cases outside basis panels: `ln(ratio) ≤ ln(1.15) + 3·SE`. Per-case cap 2.0. Ordinary deterministic cases: each metric ≤ 1.25× baseline on every seed. Zero-baseline and canary cases remain strict. Band, topology and native-basis summaries are reported only |
-| CA5 cost | `CA5/timing`, `CA5/timing-basis`, `CA5/confirm-timing`, `CA5/memory`, `CA5/preset`, `CA5/companion` | Each panel's ratio at most 1.10, and no per-case breach (> 20% and by more than 25 ms, or 32 MiB for memory). Timing panels screen with 4 rounds and measure 10 in full ([iterations-profile.md](iterations-profile.md#timing-panels)) |
-| CA6 completeness | `CA6/completeness` | Every observation present; determinism audit passed |
-
-Required IDs in `policy.json`: `harness/roundtrip`, `baseline/preflight`,
-`audit/determinism`, `CA1/C0`, `CA1/C1-C5`, `CA1/C6`, `CA1/C7`,
-`CA2/improvement`, `CA5/timing`, `CA6/completeness`, `CA3/breadth`,
-`CA5/confirm-timing` and `CA5/memory`. The evaluator adds every guard, cap and exact record it
-creates, and the cost panels the change scope requires.
-
-**Upstream tests are optional.** They belong to the `unit-tests` stage, which you may run or
-leave out ([verifier.md](workflow/unit-tests.md#what-runs)). The rule is: if you run it, it counts.
-`CA1/upstream` is not in `policy.json`; `decide` adds it to the required set once
-`unit-tests` has started (running, failed or complete). A regression then gives
-`CONSTRAINT_VIOLATION`, an unfinished or unresolved suite `INCONCLUSIVE`, and a failed stage
-`ERROR`. If the stage never started, or the quality gate skipped it, the verdict is decided
-without it and the report says "Upstream tests: not run."
-
-Report-only results:
-
-- **Stage coverage** (`CA1/stage-coverage`): lists scored cases without verified evidence
-  covering all changed stages. Gaps do not block acceptance. Passing the dedicated correctness
-  tests does not establish semantic coverage of every scored circuit.
-
-- **`U_instance`**: a family-stratified cluster bootstrap over input groups (10,000
-  replicates). It estimates how much the score depends on which circuits were chosen. It is
-  printed, not tested, because several family/size cells have fewer than three groups.
-- **Leave-iterations-out score**: the `D2` and `N2` scores recomputed without `qft_n100`,
-  `square_heisenberg_n100` and `qaoa_ba_n100_3reps` (the policy's `iterations_groups`),
-  printed in the report. A gain that lives mostly in those three circuits improved the
-  tuning loop, not the suite.
-
-Policy differences from the iterations profile: `practical_ratio` is 0.99 (versus 1.0), and
-the required set adds `CA3/breadth`, `CA5/confirm-timing` and `CA5/memory`.
-
-## Version 13
-
-Version 13 makes `CA1/stage-coverage` report-only by removing it from `required_ids`.
-`decide` still computes coverage and reports every uncovered scored case. Coverage gaps
-alone no longer make the verdict `INCONCLUSIVE`. The C1–C5 suite, API checks, C7,
-baseline preflight, numerical tolerances, timeout handling, quality guards and cost checks
-are unchanged. Actual correctness failures and unresolved required tests still block a pass.
-The workload is unchanged. Existing sessions retain their archived coverage requirement;
-new sessions use version 13. The iterations profile retains mandatory stage coverage.
-
-## Version 12
-
-Version 12 removes C1-lite entirely from the quality workflow: no scored-output
-statevector jobs, width eligibility setting, aggregate record, or gate requirement.
-The version-11 quality guard tolerances and all remaining correctness checks are retained.
-The circuit workload and weights are unchanged. State coverage must still be established
-by the remaining applicable checks; the quality gate opening is not a full correctness verdict.
-
-Use a new session. Archived sessions and their reports keep their original requirements
-and can be reproduced with their archived harness. Re-evaluating candidate 0.83's saved
-v3 measurements under version 12 clears the quality gate; correctness and cost still need
-separate evaluation.
-
-## Version 11
-
-Version 11 adds `quality_guard_tolerances`: 5% for family and optimization-level
-statistical guards, 15% for individual statistical guards outside basis panels, and 25%
-for ordinary deterministic cases on each seed. The workload and weights are unchanged.
-Overall N2, basis panels, improvement and breadth, the 2.0 per-case cap, zero-baseline
-and canary rules, and correctness requirements are unchanged.
-
-These allowances were selected after inspecting candidate 0.83; they are policy choices,
-not independently calibrated thresholds. A replay of its v3 observations clears
-the 15 quality failures, but C1-lite remains unresolved until the two width-24 outputs
-verify. Existing sessions retain their frozen policy and verdict; use a new session for
-version 11. Missing tolerance fields retain the older strict behavior.
-
-## Version 10
-
-Version 10 raises the seed-aggregated per-case quality cap from 1.20 to 2.0 for
-`D2` and `N2`. Other guards and correctness requirements keep their existing rules.
-
-## Version 9
-
-Version 9 raises the per-case quality cap from 1.05 to 1.20 for both `D2` and `N2`.
-The cap uses each case's seed-aggregated ratio. Exact-case checks, independent guard
-checks and panel-level non-regression checks remain unchanged. Existing sessions retain
-their frozen policy. The workload is unchanged from version 8.
-
-## Version 8
-
-Version 8 changes only the timeout rule: `quality_timeout` drops `max_load_per_cpu`. Host load
-is gated only in the cost stage; a candidate quality timeout is judged against the paired
-baseline seed alone ([quality](workflow/quality.md#timeouts)). The workload is unchanged from
-version 7.
-
-## Version 7
-
-Version 7 (design/updated_confirm_plan.md) makes the confirm A/A pass its own checks and
-shortens the stages:
-
-- **Harness:** C6 replays snapshots of the quality compile itself; the determinism audit
-  accepts a difference only as a proven VF2 tie (`VF2Layout` or `VF2PostLayout`); a failure
-  both revisions share is
-  `INCONCLUSIVE`, not a candidate violation; a timed-out seed is retried once and a
-  candidate timeout is classified; checks run in harness processes on 15 slots with a
-  per-case batch schedule (`quality_batch_schedule`); C7 runs one job per seed.
-- **Policy:** `clifford_seeds` 5 and `clifford_full_mode` (C7 was 10 seeds);
-  `c1_lite_max_width` 22 (was 25); `quality_timeout`; `companion_seeds` 0–9 (was 0–19) and
-  `companion_groups`; `memory_processes` 3 (was 5); `quality_cap_rule` `plain`.
-- **Manifest:** `mcx_kg24_n5` at levels 1–3 is a deterministic case on 10 seeds (it leaves the
-  score, C6 and C1-lite: 300 replays and 30 C1-lite candidates per revision); G5 weights
-  recomputed; `multiplier_h18_n20` L2 from 20 to 100 seeds; confirm-timing from 20 to 8 cases.
-- **Not in version 7:** 50 seeds on the costliest scored cases (W1). The estimator supports it
-  (50 or 100 seeds per scored case), but the list must be derived from measured costs and a
-  cluster A/A first. `su2_circular_n89` L3 keeps its 120 s timeout until its cluster compile
-  time is measured.
-
-The targets are about 45 minutes for quality (both revisions, audit included), 20 for
-correctness and 20 for cost when every screen passes. They are estimates to be measured by a
-cluster A/A (V3), not measured results.
-
-## Statistical power
-
-The score averages many roughly independent cases, so its paired standard error over 100
-seeds is about 0.2%: roughly three times smaller than the iterations profile's. A real gain
-that passed iterations has a good chance here, and a lucky one very little. What limits the
-confirm profile is the number of independent inputs, not the number of seeds. That is why
-`U_instance` is reported.
-
-## Budget
-
-From the design probe on an Apple M1 Max, serial:
-
-| Item | Cost |
-| --- | --- |
-| Quality compiles | About 15,400 compiles and 87 CPU-minutes per revision; version 7 compiles each seed once (no routing prefixes) |
-| One session | About 300 slot-minutes of quality work per revision on the cluster model (section 4.3 of the plan), about 46 minutes of wall time on 15 slots for both revisions |
-| Cost panels | When every screen passes (plan section 6, estimates): timing 3 min, preset 1, confirm-timing 5, memory 4 (9 cases × 3 processes per arm), plus timing-basis 2.5 and companion about 6 (unmeasured) when the change scope requires them: about 13 minutes narrow, 21.5 with both. A breached screen still pays for its full and rerun rounds. The 20-minute goal with both optional panels needs a measured further saving (plan section 6, D4) |
-
-Quality runs up to 15 tasks at once (compiles, checks in harness processes, audit). Plan for a long first run, and see [environments.md](environments.md) for
-build time.
-
-## Declared coverage gaps
-
-Listed in the manifest (`coverage_gaps`) and repeated in every report:
-
-- The upstream suite has no line target.
-- G2, G3 and G6 appear on only one sparse topology class.
-- G7 has no scored level-3 case.
-- Some family/size cells have fewer than three independent groups.
-- G4, G5 and G8 have no large-band scored inputs.
-
-The design plan (section 3.7) lists what the next manifest version should add first.
+The Benchpress stage runs the same 50-entry L2/L3 panel under either profile.
+See [quality](workflow/quality.md) and [Benchpress](workflow/benchpress.md) for timing
+scope and retained reports. Coverage limitations remain in the manifest and final report.

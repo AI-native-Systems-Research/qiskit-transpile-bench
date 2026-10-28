@@ -2,386 +2,147 @@
 
 [Documentation index](README.md) · [Workflow overview](workflow/README.md) · [Session rules](sessions.md)
 
-This is the main way to run a comparison. One launcher command validates your configuration
-and submits a **manager** job; the manager runs every stage as its own LSF job, measures cost
-on quiet exclusive cores, retries a cost measurement that saw interference, decides, and
-cleans the session. You do not submit stages yourself.
-
-Two words are easy to confuse. The **quiet cost job** is the `cost` stage: the only job whose
-measurements need quiet cores. **Cleanup** is the `clean` stage, which runs after `decide` to
-delete the session's bulk.
-
-## At a glance
+One launcher command validates the configuration and submits a manager. The manager
+runs each stage as a separate LSF job, records the verdict, then cleans the session
+when safe. Quality and Benchpress measure baseline/evolved runtime and run
+sequentially. Use an idle machine; no host-load monitoring or timing noise retry is
+performed.
 
 ```mermaid
 flowchart TD
-    L[lsf/submit.py on a login node] --> M[manager job, 16 slots]
-    M --> C[compile, 16 slots: both builds share them]
-    C --> Q[quality, 16]
-    Q --> R[correctness, 16]
-    Q --> U[unit-tests, 16, optional]
-    R --> K[cost, 9 exclusive cores on a quiet host]
-    U --> K
-    K -->|noisy: new job, up to 20 retries| K
-    K --> D[decide, inside the manager]
-    D --> X[clean job, 16, when safe]
+    L[lsf/submit.py] --> M[manager]
+    M --> C[compile]
+    C --> Q[quality and runtime]
+    Q --> B[Benchpress L2/L3]
+    B --> U[unit-tests, optional]
+    U --> D[decide, inside manager]
+    D --> X[clean, when safe]
 ```
 
-| Job | Slots | Placement | Starts after |
-| --- | ---: | --- | --- |
-| manager | 16 | any host; rerunnable | the launcher |
-| compile | 16 | one host; the baseline and evolved builds run concurrently and share the slots | — |
-| quality | 16 | one host | compile complete |
-| correctness | 16 | one host | quality complete |
-| unit-tests (only with `--unit-tests`) | 16 | one host | quality complete; runs alongside correctness |
-| cost | 9 | 9 exclusive physical cores, one quiet host of the approved tier | correctness complete and unit-tests settled |
-| decide | — | inside the manager | every enabled stage settled |
-| clean | 16 | one host | decide wrote a current decision and the session is safe to clean |
+Benchpress depends only on successful compilation. The manager runs it even if
+quality closes its gate or fails. Optional upstream unit tests require completed
+quality and record `skipped` when its gate closes. All jobs request 16 slots on one
+host. Serial timing workers keep measurements from competing with other workers
+in the same stage.
 
-A stage whose quality gate is closed still runs as a job with this allocation and records
-`skipped` itself within seconds. Slot counts are allocations: the harness keeps its
-parallelism within them.
+## Set up and launch
 
-## 1. Set up once
-
-On a login node, in the repository checkout (on the shared filesystem):
+The harness checkout and environment, Qiskit sources, store and sessions must be
+visible at identical absolute paths on all nodes. Nodes must have compatible OS,
+architecture and Python versions. Build environments also need the Python
+interpreter used to create them, often under the shared uv Python directory.
 
 ```bash
 uv sync --all-extras
-```
-
-```bash
 command -v bsub bjobs bhist bkill git uv rustup cc c++
-```
-
-- LSF 10.1 or newer: the manager reads `bjobs -json`.
-- `uv sync` installs the harness in `.venv/`, including the `lsf` package. Every job runs
-  this environment's Python at the same absolute path, so the checkout and `.venv/` must be
-  on the shared filesystem.
-- Install the baseline's Rust toolchain (`rustup toolchain install <channel>`, the channel
-  from the baseline's `rust-toolchain.toml`) where compute nodes can use it.
-- Builds download pinned Python packages and Rust crates. When compute nodes cannot reach
-  the network, warm the caches from a node that can (a first session's `compile` fills the
-  store's baseline wheels), or run the first `compile` on a node with network access. See
-  [setup and environments](environments.md).
-
-## 2. Choose the inputs
-
-- **Two Qiskit checkouts** on the shared filesystem: `--baseline` (the reference) and
-  `--evolved` (your change). They are snapshotted by `compile` and never modified.
-- **A profile**: `--profile iterations-profile` (the default) while iterating. Confirm once
-  with `--profile confirm-profile` in a separate session, with a new `--results-root`.
-
-## 3. Choose the shared paths
-
-```bash
 mkdir -p /shared/qtb-store /shared/qtb-sessions
-```
-
-- `--store` (or `QTB_STORE`): the baseline store; it must exist. One store serves many
-  sessions ([baseline store](store.md)).
-- `--results-root` (or `QTB_SESSION`): **the exact directory of this session's data**. It
-  must not exist yet (`compile` creates it) and its parent must exist. Nothing is appended
-  to it. Each launch starts a new session; an existing path is refused.
-- The orchestration records go next to it, in `<results-root>.lsf/`: the ledger, the logs
-  and the orchestration report. They stay outside the session's cleanup.
-
-Explicit arguments win over the environment variables. See [shared paths and compatible
-hosts](#shared-paths-and-compatible-hosts) for what every node must see.
-
-## 4. Choose the site resources
-
-| Setting | Options | Default |
-| --- | --- | --- |
-| Queue | `--queue` for every job; `--<job>-queue` for one | the site's default queue |
-| Memory (GB) | `--<job>-mem-gb` | compile 64, quality 32, correctness 32, unit-tests 32, cost 16, clean 4, manager 4 |
-| Run limit | `--<job>-wall`, `[hours:]minutes` | compile 6:00, quality 12:00, correctness 12:00, unit-tests 10:00, cost 8:00, clean 1:00, manager 168:00 |
-| Cost hardware tier | `--cost-model` and/or `--cost-ncpus` (at least one) | none: you must choose |
-| Cost load limit at dispatch | `--cost-max-r1m` | 10 |
-
-`<job>` is `compile`, `quality`, `correctness`, `unit-tests`, `cost`, `clean` or `manager`.
-Memory requests are in GB, as `rusage[mem=]` is on sites with `LSF_UNIT_FOR_LIMITS=GB`. The
-defaults are starting points: check them against your queues' limits. The manager's run
-limit must exceed every stage's.
-
-**Fixed, not options:** 16 slots for every job except cost, 9 exclusive physical cores for
-cost, both monitoring checks, and at most 20 cost noise retries (21 cost jobs).
-
-**The quiet cost job** is submitted as:
-
-```text
--n 9 -R "select[r1m < 10 && ncpus == 56] span[hosts=1]
-         affinity[core(1,exclusive=(core,alljobs))] rusage[mem=16]"
-```
-
-The affinity request is per slot, so nine slots reserve nine physical cores with their SMT
-siblings. Whole-host exclusivity (`bsub -x`) is not used. Pin the hardware tier with a
-verified CPU-model selector (`--cost-model`) when your site has one; a core count alone
-(`--cost-ncpus`) does not guarantee identical hardware. `r1m < 10` and `ncpus == 56` are
-IOCR's starting values, not universal thresholds. A low load at dispatch improves placement
-but does not guarantee quiet cores later; the cost job's own monitor checks that.
-
-## 5. Start the session
-
-```bash
 uv run python lsf/submit.py \
   --store /shared/qtb-store \
   --results-root /shared/qtb-sessions/idea1 \
   --baseline /shared/qiskit-baseline \
   --evolved /shared/qiskit-evolved \
-  --profile iterations-profile \
-  --queue normal \
-  --cost-ncpus 56 \
-  --cost-max-r1m 10
+  --profile confirm-profile \
+  --queue normal
 ```
 
-The optional upstream tests are off by default; add `--unit-tests` to run them. For detailed logs, add
-`--log-level DEBUG` (or set `LSF_LOG_LEVEL=DEBUG`). `uv run python lsf/submit.py --help`
-lists every option with its default.
+LSF must support `bjobs -json`. The baseline's Rust toolchain must be available on
+compute nodes. Builds and Benchpress preparation fetch pinned dependencies; warm
+the caches or provide local source mirrors when compute nodes cannot reach the
+network. See [setup and environments](environments.md).
 
-The launcher checks the paths, the profile, the tier and every resource value, and that the
-LSF commands exist, before it submits anything. It prints:
+The store and session's parent directory must already exist. Each launch uses a
+new session path, which `compile` creates. Source checkouts are snapshotted without
+modifying them. `iterations-profile` is the default; use a separate new session
+with `confirm-profile` for confirmation. Confirm quality and Benchpress run only
+at optimization levels 2 and 3.
 
-```text
-Submitted manager job 812345 (LSF accepted it; the benchmark has not run yet).
-  session:      /shared/qtb-sessions/idea1
-  run:          20260926T101500-3fa9c1
-  logs:         /shared/qtb-sessions/idea1.lsf/logs/20260926T101500-3fa9c1
-  manager log:  /shared/qtb-sessions/idea1.lsf/logs/20260926T101500-3fa9c1/manager-1.log (a requeued manager: manager-2.log)
-  ledger:       /shared/qtb-sessions/idea1.lsf/ledger.json
-  report:       /shared/qtb-sessions/idea1.lsf/report.md
-  watch:        bjobs -a -J 'qtb-20260926T101500-3fa9c1-*'
-  stop:         python -m lsf.control stop --results-root /shared/qtb-sessions/idea1
-```
+Add `--unit-tests` for optional upstream Python/Rust tests. `QTB_STORE` and
+`QTB_SESSION` provide path defaults; explicit options win. `--log-level DEBUG` or
+`LSF_LOG_LEVEL=DEBUG` enables detailed logging. The launcher prints the manager job
+ID, session, log, ledger and report paths. Exit 0 means LSF accepted the manager,
+41 an unmet precondition, 40 submission failure and 64 invalid usage.
 
-Record the job ID and the paths. Exit status: 0 accepted, 41 a precondition is not met (an
-existing session, a missing path or command), 40 LSF did not accept the manager, 64 usage.
+## Resource settings
 
-## 6. Watch it
+| Job | Slots | Memory (GB) | Wall limit |
+| --- | ---: | ---: | --- |
+| compile | 16 | 64 | 6:00 |
+| quality | 16 | 32 | 12:00 |
+| benchpress | 16 | 32 | 12:00 |
+| unit-tests | 16 | 32 | 10:00 |
+| clean | 16 | 4 | 1:00 |
+| manager | 16 | 4 | 168:00 |
 
-```bash
-bjobs -a -J 'qtb-20260926T101500-3fa9c1-*'
-```
+`--queue` sets a common queue; `--<job>-queue`, `--<job>-mem-gb` and
+`--<job>-wall` override a job. Memory uses the site's `LSF_UNIT_FOR_LIMITS=GB`
+convention. Wall limits use `[hours:]minutes`. These defaults are starting points;
+check your site's queue limits. The manager's wall limit must exceed every stage's.
+
+Pending time counts toward the manager's internal deadline. It reserves time to
+cancel owned jobs before the wall limit and refuses to submit a stage that cannot
+fit. Each build shares the compile job's slots. The quality timing pass and
+Benchpress run serial baseline/evolved measurements without load checks.
+
+## Watch and read results
 
 ```bash
 uv run python -m lsf.control status --results-root /shared/qtb-sessions/idea1
+bjobs -a -J 'qtb-<run-id>-*'
 ```
 
-```bash
-tail -f /shared/qtb-sessions/idea1.lsf/logs/20260926T101500-3fa9c1/manager-1.log
-```
+The session's `report.md`, `report.json` and `decision.json` contain the benchmark
+verdict. Stage reports under `stages/quality/` and `stages/benchpress/` contain the
+runtime and circuit-quality comparisons. The sibling `<session>.lsf/report.md`
+and `report.json` show every submitted job, outcome, host, logs, resume and cleanup
+result. `launch.json` stores the configuration and `ledger.json` the durable job
+history. Orchestration records survive session cleanup.
 
-- `PEND` is normal: the manager waits and never submits a duplicate. `bjobs -l <id>` shows
-  the pending reason, which the manager also logs. Pending time counts toward the manager's
-  deadline.
-- Every job is named `qtb-<run>-<stage>[-a<attempt>]-<nonce>`. A cost job's name carries its
-  attempt number.
-- A job is finished when LSF reports it terminal **and** its committed stage state matches
-  the job. A job that has left `bjobs` is looked up in `bhist` and in its outcome record; it
-  is not assumed to have succeeded.
-  An outcome file alone does not prove termination. If history cannot confirm it, the
-  ledger keeps the job unresolved and the manager stops before deciding or cleaning;
-  use `lsf.control reap` after scheduler visibility is restored.
-- A cost job that ends `noisy` (exit 42) saw interference: it is a retry, not a failed
-  candidate.
+Under `<session>.lsf/logs/<run-id>/`, each launcher, manager invocation and stage
+job has separate `.log` and `.events.jsonl` files. LSF output appears in `.out`
+files and large scheduler responses in `diagnostics/`. INFO records decisions and
+transitions; DEBUG includes unchanged polls and scheduler command responses.
 
-Where things are, under `<results-root>.lsf/logs/<run>/`:
+A completed scheduler job is trusted only when its outcome record and stage state
+agree on the invocation. A missing `bjobs` entry is checked against `bhist`; an
+outcome file alone does not prove the process ended. If termination cannot be
+confirmed, the manager leaves the session intact for recovery.
 
-| File | Content |
-| --- | --- |
-| `launcher.log`, `launcher.events.jsonl` | The effective configuration and the manager's submission |
-| `manager-<n>.log`, `manager-<n>.events.jsonl` | Every decision of the manager's `n`-th invocation |
-| `manager.<jobid>.out` | The manager job's stdout and stderr |
-| `jobs/job-<key>.log`, `jobs/job-<key>.events.jsonl` | One stage job: allocation, harness output, monitoring |
-| `jobs/<key>.<jobid>.out` | That job's stdout and stderr |
-| `diagnostics/` | Large scheduler responses |
+The manager's exit code is the verdict: 0 `PASS`, 10 `NO_IMPROVEMENT`,
+20 `CONSTRAINT_VIOLATION`, 30 `INCONCLUSIVE` or 40 `ERROR`. Cleanup follows when
+safe, with any cleanup error reported separately.
 
-## 7. What happens inside
-
-- **compile** builds the baseline (or reuses it from the store) and the evolved revision
-  concurrently in one job; both builds' compilers share the 16 slots, and a finished build
-  is kept if the other fails. Only when both builds and the input round-trip succeed is
-  quality submitted.
-- **correctness** and **unit-tests** run in parallel after quality. Cost waits for both to
-  settle.
-- **cost** runs on 9 exclusive cores. Before measuring, its monitor checks the allocation
-  (one host, nine slots, the exclusive-core request, the approved tier), reads the CPU
-  topology, pins itself to the first core and the serial cost worker to the second, and
-  probes the worker core while nothing runs. During measurement it checks, in bounded
-  windows of every worker process: **A**, foreign CPU time on the worker core (all SMT
-  siblings). The first failing measured
-  window aborts the measurement (setup and warmup windows are recorded but never abort); the job exits 42 and the stage is `noisy`. Details: [cost](workflow/cost.md#measurement-modes).
-- **Retries.** After a `noisy` cost job the manager submits a new cost job, which is placed
-  afresh and avoids the hosts that were noisy before (`hname != ...` in its `select[]`): a
-  host whose idle probe failed at once, one whose measurement failed after two such
-  attempts; at most the 8 most recent are excluded. Complete, clean regime bundles from earlier attempts are reused; the interrupted
-  regime is measured again from scratch. The ledger counts attempts: one initial job and at
-  most 20 retries. A killed, failed or refused cost job is not retried: only positive
-  contamination evidence is. A submission LSF never answered blocks further attempts while
-  the manager looks for it by name; one never found within an hour counts as a lost attempt,
-  is still cancelled by `reap` if it appears, and allows no retry.
-- **Exhaustion.** After 21 cost jobs the manager stops, records exhaustion in the ledger and
-  decides. Missing cost evidence blocks `PASS`; the verdict is normally `INCONCLUSIVE`. A
-  stage failure or an independently proven violation still takes precedence.
-- **decide** runs inside the manager. **Cleanup** follows as its own 16-slot job whatever the
-  verdict, unless a stage is unfinished (`running`, `noisy`, or required and not started);
-  the reason is logged. The verdict's exit code is kept; a cleanup problem is reported
-  separately.
-
-## 8. Read the results
-
-1. `<results-root>/report.md`: the verdict, stage table, notes and constraints needing
-   attention.
-2. `<results-root>/decision.json`: the same for scripts.
-3. `<results-root>.lsf/report.md`: every job with its host, exit code and output file, every
-   cost attempt with its outcome and monitoring evidence, the retry budget used and remaining,
-   why the pipeline stopped, and the cleanup outcome.
-
-| Verdict | Exit | Meaning |
-| --- | ---: | --- |
-| `PASS` | 0 | Quality improved and every required constraint passed, cost included |
-| `NO_IMPROVEMENT` | 10 | No gain beyond seed noise |
-| `CONSTRAINT_VIOLATION` | 20 | A candidate check or a cost guard failed. A cost failure here was measured on clean cores |
-| `INCONCLUSIVE` | 30 | Something required is missing or unresolved. "Cost: no clean measurement" means every attempt saw interference: that is not an observed regression |
-| `ERROR` | 40 | A harness, build or worker failure |
-
-The manager job's own exit status is the verdict's. Cleanup may be skipped by its safety
-checks, for example after retry exhaustion (cost is `noisy`); the session then keeps its
-bulk and its `report.md` says which stage is unfinished.
-
-## 9. Stop, cancel and recover
+## Stop, recover and resume
 
 ```bash
 uv run python -m lsf.control stop --results-root /shared/qtb-sessions/idea1
-```
-
-`stop` cancels the manager (after checking the job's name and owner); the manager then
-cancels every job it owns, confirms they ended, and exits. If the manager was killed in a
-way it could not handle (SIGKILL, a lost host), cancel what it left:
-
-```bash
 uv run python -m lsf.control reap --results-root /shared/qtb-sessions/idea1
-```
-
-`reap` refuses while a manager holds the session's lock. It cancels only jobs whose ID, name
-and owner match the ledger, then settles them. Run it again if it reports unconfirmed jobs.
-
-The manager is submitted rerunnable: if its host fails, LSF requeues it, and the new
-invocation (`manager-2.log`) reconciles the ledger first: it adopts jobs that are still
-running, settles those that ended and keeps the attempt count.
-
-### Resume a session
-
-After the manager ended (exhausted retries, a deadline, a failed stage you fixed, a killed
-manager), continue the same session instead of starting over:
-
-```bash
 uv run python lsf/submit.py --resume --results-root /shared/qtb-sessions/idea1
 ```
 
-The new manager (`qtb-<run>-manager-r<n>`) keeps the recorded inputs and resources and
-starts a new *epoch* in the ledger: every unfinished stage gets one new job, cost gets a
-fresh budget of 21 jobs and no excluded hosts, and finished stages never run again. Attempt
-numbers keep counting. The previous epoch's cost accounting, verdict and cleanup are kept in
-`ledger.json:resumes`; `report.md` lists every resume. The recorded inputs and resources
-are kept: pass `--results-root` and optionally `--log-level`. Any other option may be
-repeated with its recorded value (so the original command works with `--resume` added) but
-not changed. The interpreter and project are taken from the running launcher.
+`stop` cancels the manager, which cancels owned stage jobs. Use `reap` if a manager
+was killed without handling a signal. These commands verify job name and owner
+before cancellation; `reap` refuses while a manager holds the orchestration lock.
 
-A resume is refused (exit 41) when:
+Resume requires the previous manager and its jobs to have ended. It preserves
+inputs and resources, starts a new ledger epoch and permits one new job per
+unfinished stage. Completed or skipped stages never rerun. Every earlier epoch's
+verdict and cleanup remain in the ledger. Any options supplied with `--resume`
+must match the recorded launch, except `--log-level`.
 
-- the session is cleaned: nothing can be measured again (`qtb decide` replays its verdict);
-- a manager holds the session or is still in LSF (`lsf.control stop`), or any other job is
-  still active or unreconciled in the ledger (`lsf.control reap`);
-- an unfinished stage is pinned to another harness than the running one: every stage runs
-  with the harness that compiled the session (its wheel is in `harness-wheel/`).
-
-When only cost is unfinished and a later harness should measure it, for example because the
-harness that compiled the session aborts on noise its successor no longer judges, re-pin cost
-alone:
-
-```bash
-uv run python lsf/submit.py --resume --upgrade-cost \
-    --reason "monitor /2: setup windows no longer abort" --results-root /shared/qtb-sessions/idea1
-```
-
-This appends an amendment to `run.json:amendments`: the new coordinator and implementation
-identities (for the cost stage only), the new `cost_evidence` requirement, the replaced
-values, the reason, and the new harness wheel under `harness-wheel/amendments/<n>/`. It is
-refused unless compile, quality and correctness are final (unit-tests final or never
-started) and cost is not final: a finished cost stage is never measured again, under any
-harness. Saved cost bundles are checked against the new requirement before reuse and measured
-again when they fail it. The build environments and their harness wheel
-(`run.json:hashes.harness`) stay the compiled ones. The verdict notes every amendment.
-
-To measure again from scratch, launch a new session with a new `--results-root`; the store
-makes it pay only for the evolved half. To run or replay single stages by hand, see [running
-the stages directly](workflow/README.md).
-
-## 10. Detailed logs
-
-`--log-level DEBUG` (or `LSF_LOG_LEVEL=DEBUG`) reaches the launcher, the manager and every
-job. At `INFO` the logs record decisions: the effective configuration, each submission with
-its exact shell-quoted command, state transitions with pending reasons, periodic waiting
-summaries, stage outcomes, retry decisions and the budget, cancellations and cleanup. `DEBUG`
-adds every unchanged poll, every scheduler command and response, and each monitoring
-window's raw counters. Monitoring details are written after each worker is reaped, never
-inside a measured interval.
-
-Every JSONL event has `ts` (UTC), `level`, `component`, `event`, and the correlation fields
-`run_id`, `session`, `stage`, `attempt`, `job_key`, `job_id`, `nonce` (on submissions),
-`host` and `pid`. Credential-looking fields are redacted.
-
-```bash
-grep -h '"event": "stage.outcome"' /shared/qtb-sessions/idea1.lsf/logs/*/manager-*.events.jsonl
-```
+A session that has been cleaned cannot resume, but `decide` can replay its verdict.
+Unfinished stages must use the harness identity pinned by the session; use its
+archived wheel if the working harness changed. A requeued manager reconciles and
+adopts active jobs before scheduling, preventing duplicates.
 
 ## Troubleshooting
 
-| Symptom | Where to look | Next action |
-| --- | --- | --- |
-| A job pends for hours | `bjobs -l <id>`; `poll.waiting` events | Relax `--cost-max-r1m` or the tier, or use another queue. Pending time counts toward the deadline |
-| Cost exits 41: "Monitored cost cannot run in this allocation" | the cost job's log, `job.finished` | The site ignored the affinity request, the mask covers only part of an SMT core, or the host is not the approved tier. Check the queue enables affinity and the tier selector |
-| "the evidence extension ... is unavailable" in `report.md` | the session's `run.json:cost_evidence` | Decide with the harness that created the session (its wheel is in `harness-wheel/`) |
-| Cost attempts keep ending `noisy` | the orchestration report's cost table; `contamination*.json` under `<results-root>/cost/monitor/<job key>/` | Check which check failed and the foreign fraction. Busy tiers need calibration of thresholds and windows; narrow the tier or the load limit |
-| "Retry budget exhausted" | `ledger.json` → `cost.exhausted` | The verdict is `INCONCLUSIVE`, not a regression. `--resume` later for a fresh budget, or launch a new session on a quieter tier |
-| `--resume` refused: "cost is pinned to another harness" | `run.json:hashes`, `harness-wheel/` | Resume with the archived harness wheel, or `--resume --upgrade-cost --reason ...` ([resume](#resume-a-session)) |
-| compile fails | `jobs/job-compile-*.log`; `builds/evolved-build/build.log` or the store's `build.log` | Fix the toolchain or dependency cache; launch a new session |
-| A stage exits 41 "cannot run the ... build" | the job log | The node differs in OS, architecture or Python, or the interpreter path is not shared |
-| Shared path missing on a node | the job's `.out` file | Mount the store, sessions, checkout and uv Python at identical paths |
-| `poll.query_failed` warnings | the manager log | Transient scheduler problems; the manager keeps waiting and never assumes a job is gone |
-| `cancel.unconfirmed` or leftover jobs | the manager log; `lsf.control status` | Run `lsf.control reap` |
-
-## Shared paths and compatible hosts
-
-Each stage can run on a different host. Then:
-
-- **Shared filesystem, same path.** The session directory, the store, the repository
-  checkout with its `.venv/`, and the Qiskit checkouts must be on a shared filesystem mounted
-  at the same path on every node. Virtual environments and job files hold absolute paths,
-  and `run.json:store` is absolute.
-- **The Python interpreter.** Build environments link to the Python that ran `compile`,
-  usually a `uv` Python under `~/.local/share/uv/python`. That directory must be shared, or
-  exist at the same path on every node, including the node that first built a baseline into
-  the store.
-- **Host check.** Before running, each stage after `compile` checks that the OS, CPU
-  architecture and Python version match each build's identity, and that the build's
-  interpreter exists and runs. Otherwise it exits 41.
-- **Workers.** A stage job uses the slots LSF granted (translated by `lsf/context.py`); a
-  direct run uses one less than the CPU count, at most 12. The number is recorded in the
-  stage's `state.json`. Quality runs one fewer task than its slots at once (15 on its 16-slot
-  job: compiles, checks, audit recompiles and verification), and cost is serial.
-- **Machine identity.** Each stage records its own host in `state.json`. `run.json:machine`
-  is the `compile` host, for information only. The baseline quality key uses the `quality`
-  host's CPU, and cost bundles record the `cost` host and its monitoring evidence.
-- **The harness is pinned.** Changing the harness, including the monitor, its evidence
-  validator or the allocation adapter under `lsf/`, makes later stages of a running session
-  refuse to start (exit 41). Changing queues, memory or run limits does not.
-
-## Still to calibrate on your cluster
-
-The monitoring thresholds and window length are frozen with contract `qtb-lsf-monitor/4`
-(foreign CPU below 15 % of physical-core time, 2-second windows, only measured windows decisive); they are IOCR's starting values. Before relying on cost verdicts, run
-quiet A/A sessions and controlled contention on the chosen tier to establish the false
-rejection rate and the monitoring overhead ([validation](validation.md#monitored-cost-on-lsf)).
-Changing a threshold is a new contract version.
+| Symptom | Action |
+| --- | --- |
+| Long queue wait | Inspect `bjobs -l <id>` and manager pending-reason logs; choose an appropriate queue for the next launch |
+| Compile fails | Inspect the job log and build logs; fix toolchain or dependency-cache availability |
+| A stage cannot run a build | Check matching OS, architecture, Python version and interpreter path on the node |
+| Missing shared path | Mount store, sessions, checkout, environments and uv Python at identical paths |
+| Benchpress preparation fails | Inspect its stage log and pinned source/dependency availability |
+| Scheduler query warnings | Wait for scheduler recovery; the manager does not interpret query failures as job termination |
+| Unconfirmed cancellation or leftover jobs | Restore scheduler visibility, then run `lsf.control reap` |
+| Unstable timing | Start a new session on an idle machine; load is neither measured nor corrected |

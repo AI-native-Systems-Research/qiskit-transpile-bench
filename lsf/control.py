@@ -18,7 +18,7 @@ from pathlib import Path
 from qtb.canonical import read_json
 from qtb.coordinator.storage import LockBusy
 
-from lsf import lsf_directory, retry
+from lsf import lsf_directory
 from lsf.retry import ACTIVE, Ledger
 from lsf.scheduler import LsfBackend, QueryFailed
 
@@ -46,11 +46,6 @@ def status(lsf_dir, backend, out=print):
             f"  {entry['key']:<28} job {entry.get('job_id') or '—':>10}  {entry['status']:<12} "
             f"{shown or ''}{f'  ({reason})' if reason else ''}"
         )
-    cost = ledger.data["cost"]
-    if ledger.epoch:
-        out(f"  cost jobs this epoch: {retry.budget_used(ledger)} of {retry.MAX_COST_ATTEMPTS}")
-    if cost.get("exhausted"):
-        out(f"  cost retries exhausted: {cost['exhausted']['reason']}")
     decide = ledger.data.get("decide") or {}
     if decide:
         cleanup = (ledger.data.get("cleanup") or {}).get("status")

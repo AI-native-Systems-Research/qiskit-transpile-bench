@@ -1,26 +1,7 @@
-"""Start one benchmark session on LSF: validate everything, then submit the manager job.
+"""Launch or resume the compile, quality, Benchpress and optional unit-test pipeline.
 
-    uv run python lsf/submit.py --store DIR --results-root NEW_SESSION \\
-        --baseline QISKIT_A --evolved QISKIT_B --cost-ncpus 56
-
-Explicit arguments win over the ``QTB_STORE``/``QTB_SESSION``/``LSF_LOG_LEVEL`` fallbacks,
-which win over the defaults. ``--results-root`` is the exact directory of this session's
-data: it must not exist yet, and ``compile`` creates it. The orchestration records go to
-the sibling ``<results-root>.lsf/``. Allocations are fixed (16 slots, 9 exclusive cores for
-cost) and so is the internal limit of 20 cost noise retries. A successful submission means
-LSF accepted the manager, not that the benchmark finished.
-
-    uv run python lsf/submit.py --resume --results-root SESSION
-    uv run python lsf/submit.py --resume --upgrade-cost --reason TEXT --results-root SESSION
-
-``--resume`` continues a session this launcher started, after its manager ended: every
-unfinished stage gets one new job and cost a fresh retry budget (``lsf.retry`` epochs). The
-recorded inputs and resources are kept: other options may repeat them, not change them. It
-is refused when the session is cleaned, while a manager or any job of the session is still
-in LSF (``lsf.control stop``/``reap``), and when an unfinished stage is pinned to another
-harness than this one. ``--upgrade-cost`` first re-pins an unfinished cost stage, and only
-that, to this harness (``qtb.coordinator.amend``, recorded with ``--reason`` in
-``run.json:amendments``); a finished cost stage is never measured again.
+Every job uses 16 slots. Quality and Benchpress run sequentially and measure runtime
+without host-load monitoring; submit to an idle machine for comparable timings.
 """
 
 if __name__ == "__main__" and not __package__:
@@ -50,28 +31,24 @@ from lsf.scheduler import JobSpec, LsfBackend, QueryFailed, slots, wall_seconds
 
 EXIT_OK, EXIT_ERROR, EXIT_PRECONDITION, EXIT_USAGE = 0, 40, 41, 64
 PROFILES = ("iterations-profile", "confirm-profile")
-JOBS = ("compile", "quality", "correctness", "unit-tests", "cost", "clean", "manager")
+JOBS = ("compile", "quality", "benchpress", "unit-tests", "clean", "manager")
 # Site starting points: check them against your queues' limits before relying on them.
 DEFAULT_MEM_GB = {
     "compile": 64,
     "quality": 32,
-    "correctness": 32,
+    "benchpress": 32,
     "unit-tests": 32,
-    "cost": 16,
     "clean": 4,
     "manager": 4,
 }
 DEFAULT_WALL = {
     "compile": "6:00",
     "quality": "12:00",
-    "correctness": "12:00",
+    "benchpress": "12:00",
     "unit-tests": "10:00",
-    "cost": "8:00",
     "clean": "1:00",
     "manager": "168:00",
 }
-DEFAULT_MAX_R1M = 10.0
-MODEL = re.compile(r"^[A-Za-z0-9_.\-]+$")
 QUEUE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 
@@ -122,7 +99,7 @@ def parser():
     )
     resources = cli.add_argument_group(
         "cluster resources",
-        "Slots are fixed: 16 for every job, 9 exclusive physical cores for cost. Memory is "
+        "Slots are fixed: 16 for every job. Memory is "
         "in GB (rusage[mem=]); walls are LSF run limits, [hours:]minutes.",
     )
     resources.add_argument("--queue", help="queue for every job (default: the site's)")
@@ -138,21 +115,6 @@ def parser():
         resources.add_argument(
             f"--{job}-wall", metavar="H:MM", default=DEFAULT_WALL[job], help=f"run limit for {job}"
         )
-    quiet = cli.add_argument_group(
-        "quiet-node selection",
-        "The approved hardware tier for cost: at least one of --cost-model and --cost-ncpus. "
-        "The load limit applies at dispatch only; the job's own monitor checks the cores.",
-    )
-    quiet.add_argument("--cost-model", help="LSF host model (select[model == M])")
-    quiet.add_argument(
-        "--cost-ncpus", type=int, help="physical cores of the host (select[ncpus == N])"
-    )
-    quiet.add_argument(
-        "--cost-max-r1m",
-        type=float,
-        default=DEFAULT_MAX_R1M,
-        help="dispatch-time limit on the host's 1-minute run queue (select[r1m < L])",
-    )
     resume = cli.add_argument_group(
         "resuming",
         "Continue an existing session after its manager ended, with its recorded inputs and "
@@ -162,16 +124,8 @@ def parser():
     resume.add_argument(
         "--resume",
         action="store_true",
-        help="submit a new manager for the session's unfinished stages; cost gets a fresh "
-        "retry budget",
+        help="submit a new manager for the session's unfinished stages",
     )
-    resume.add_argument(
-        "--upgrade-cost",
-        action="store_true",
-        help="with --resume: re-pin the unfinished cost stage, and only it, to this harness "
-        "(recorded in run.json:amendments; needs --reason)",
-    )
-    resume.add_argument("--reason", help="why cost is re-pinned (with --upgrade-cost)")
     logging_ = cli.add_argument_group("logging")
     logging_.add_argument(
         "--log-level",
@@ -219,14 +173,6 @@ def resolve(args, environ=None):
         raise Refused(f"{lsf_dir} already exists; pass a new --results-root", EXIT_PRECONDITION)
     baseline = _existing_directory(args.baseline.expanduser().resolve(), "The baseline")
     evolved = _existing_directory(args.evolved.expanduser().resolve(), "The evolved checkout")
-    if args.cost_model is None and args.cost_ncpus is None:
-        raise Refused("choose the approved cost hardware tier: --cost-model and/or --cost-ncpus")
-    if args.cost_model is not None and not MODEL.match(args.cost_model):
-        raise Refused(f"invalid --cost-model {args.cost_model!r}")
-    if args.cost_ncpus is not None and args.cost_ncpus <= slots("cost"):
-        raise Refused(f"--cost-ncpus must exceed the {slots('cost')} cores cost reserves")
-    if not args.cost_max_r1m > 0:
-        raise Refused("--cost-max-r1m must be positive")
     resources = {}
     for job in JOBS:
         key = job.replace("-", "_")
@@ -266,13 +212,6 @@ def resolve(args, environ=None):
         "project": str(Path(__file__).resolve().parents[1]),
         "log_level": level,
         "resources": resources,
-        "cost_selector": {
-            "model": args.cost_model,
-            "ncpus": args.cost_ncpus,
-            "max_r1m": args.cost_max_r1m,
-        },
-        "tier": {"model": args.cost_model, "ncpus": args.cost_ncpus},
-        "max_cost_retries": retry.MAX_COST_RETRIES,
         "measurement_identity": measurement_identity(),
     }
 
@@ -352,9 +291,9 @@ def _submit_manager(config, backend, ledger, key):
 
 
 # Options a resume may pass; every other one keeps the recorded launch.
-RESUME_OPTIONS = {"results_root", "log_level", "resume", "upgrade_cost", "reason"}
+RESUME_OPTIONS = {"results_root", "log_level", "resume"}
 # The stage order a resume checks; unit-tests only when the launch runs it.
-STAGES = ("compile", "quality", "correctness", "unit-tests", "cost")
+STAGES = ("compile", "quality", "benchpress", "unit-tests")
 # What a resume takes from the running launcher; the previous values are kept in the ledger.
 REFRESHED = ("python", "project", "measurement_identity", "log_level")
 
@@ -362,8 +301,6 @@ REFRESHED = ("python", "project", "measurement_identity", "log_level")
 def resume_target(args, environ=None):
     """The orchestration directory of the session to resume; ``Refused`` when there is none."""
     environ = os.environ if environ is None else environ
-    if args.upgrade_cost and not (args.reason or "").strip():
-        raise Refused("--upgrade-cost needs --reason: it is recorded in run.json:amendments")
     session = args.results_root or environ.get("QTB_SESSION")
     if not session:
         raise Refused("pass --results-root DIR, the session to resume (or set QTB_SESSION)")
@@ -402,16 +339,12 @@ def _changed(args, launch):
 
 def _recorded_options(launch):
     """The command-line value of each option, as recorded in ``launch``."""
-    selector = launch["cost_selector"]
     options = {
         "baseline": launch["baseline"],
         "evolved": launch["evolved"],
         "store": launch["store"],
         "profile": launch["profile"],
         "unit_tests": launch["unit_tests"],
-        "cost_model": selector["model"],
-        "cost_ncpus": selector["ncpus"],
-        "cost_max_r1m": selector["max_r1m"],
     }
     queues = {launch["resources"][job]["queue"] for job in JOBS}
     if len(queues) == 1:
@@ -455,9 +388,6 @@ def _resume_locked(args, backend, lsf_dir, environ, progress):
         )
     _check_jobs_ended(ledger, backend, session)
     pending = _unfinished(launch, session)
-    amendment = None
-    if args.upgrade_cost:
-        amendment = _upgrade_cost(launch, session, pending, args.reason, progress)
     _check_harness(session, pending)
     previous = {key: launch.get(key) for key in REFRESHED}
     explicit = args.log_level or environ.get("LSF_LOG_LEVEL")
@@ -479,7 +409,6 @@ def _resume_locked(args, backend, lsf_dir, environ, progress):
     record = ledger.begin_epoch(
         manager=key,
         pending=pending,
-        amendment=amendment["index"] if amendment else None,
         launch={"previous": previous},
     )
     log.event(
@@ -548,22 +477,6 @@ def _unfinished(launch, session):
     return pending
 
 
-def _upgrade_cost(launch, session, pending, reason, progress):
-    from qtb.coordinator.amend import amend_cost
-    from qtb.errors import HarnessError
-
-    from lsf.cost_evidence import requirement
-
-    if not (session / "run.json").exists():
-        raise Refused("--upgrade-cost needs a compiled session", EXIT_PRECONDITION)
-    try:
-        return amend_cost(
-            session, {"cost_evidence": requirement(launch["tier"])}, reason, progress=progress
-        )
-    except HarnessError as exc:
-        raise Refused(f"--upgrade-cost: {exc}", EXIT_PRECONDITION) from exc
-
-
 def _check_harness(session, pending):
     """Every unfinished stage must be pinned to this harness, or its stage job refuses."""
     from qtb.config import coordinator_identity, implementation_identity
@@ -578,14 +491,9 @@ def _check_harness(session, pending):
         differ = [k for k, v in current.items() if pinned.get(k) not in (None, v)]
         if not differ:
             continue
-        hint = (
-            "; or pass --upgrade-cost --reason TEXT to re-pin cost to this harness"
-            if pending == ["cost"]
-            else ""
-        )
         raise Refused(
             f"{stage} is pinned to another harness ({', '.join(differ)} identity differs); "
-            f"resume with the harness wheel archived in {session / 'harness-wheel'}{hint}",
+            f"resume with the harness wheel archived in {session / 'harness-wheel'}",
             EXIT_PRECONDITION,
         )
 
@@ -595,8 +503,6 @@ def main(argv=None, backend=None, environ=None):
     backend = backend or LsfBackend()
     record = None
     try:
-        if args.upgrade_cost and not args.resume:
-            raise Refused("--upgrade-cost re-pins an existing session: pass --resume too")
         missing = backend.missing_commands()
         if args.resume:
             lsf_dir = resume_target(args, environ)
@@ -623,7 +529,6 @@ def main(argv=None, backend=None, environ=None):
             f"Resume {record['index']} of {config['session']}: "
             f"{', '.join(record['pending']) or 'no stage'} unfinished; the new manager runs "
             "them, then decide"
-            + (f" (cost re-pinned: amendment {record['amendment']})" if record["amendment"] else "")
             + "."
         )
     print(

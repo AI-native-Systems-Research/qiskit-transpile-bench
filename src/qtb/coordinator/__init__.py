@@ -109,7 +109,7 @@ def same_build(builds):
 
 
 def gate(builds, records, required_quality=(), required_improvements=()):
-    """Whether correctness, unit tests and cost run: ``(state, reason)``.
+    """Whether optional upstream unit tests run: ``(state, reason)``.
 
     ``records`` are the evaluated quality records together with the compile and quality
     evidence. Every non-improvement record must pass, including the round-trip, the audit,
@@ -201,7 +201,11 @@ def worker_count():
 
 
 def quality_cases(manifest):
-    return [c for c in manifest["cases"] if c["role"] not in {"timing", "memory"}]
+    return [
+        c for c in manifest["cases"]
+        if c["role"] not in {"timing", "memory"}
+        and (manifest.get("profile") != "confirm-profile" or c["optimization_level"] in {2, 3})
+    ]
 
 
 def profile_prefix(profile):
@@ -599,14 +603,7 @@ class Comparison:
         self.evidence(record("harness/roundtrip", "harness", "passed"))
 
     def roundtrip_cases(self):
-        cases = list(self.manifest["cases"])
-        cases.extend(read_json(self.fixtures / "correctness-suite.json")["cases"])
-        cases.extend(
-            dict(c, circuit=c["clifford_variant"])
-            for c in self.manifest["cases"]
-            if "clifford_variant" in c
-        )
-        return cases
+        return quality_cases(self.manifest)
 
     @property
     def workers(self):

@@ -120,7 +120,8 @@ reuses the baseline's wheel.
 ## Input round-trip
 
 After both builds and the verifier are ready, each revision rebuilds every distinct frozen
-input circuit and target, including correctness fixtures and Clifford variants. The exports
+quality input circuit and target. Benchpress validates its own inputs and targets during
+its preparation. The exports
 must reproduce the frozen hashes. A mismatch fails the stage with exit 40; success commits
 `harness/roundtrip`. This establishes that both revisions received identical inputs.
 
@@ -181,4 +182,4 @@ A build command that exceeds its timeout fails `compile` (exit 40) with the path
   installed Qiskit. Check for a stray `PYTHONPATH` or `.pth` file.
 - "This host cannot run the baseline build" (exit 41): the stage runs on a host with another
   OS, architecture or Python, or the build's interpreter is not at the same path there.
-- `compile` catches all of these build problems before any quality, correctness or cost work.
+- `compile` catches all of these build problems before quality or Benchpress work.

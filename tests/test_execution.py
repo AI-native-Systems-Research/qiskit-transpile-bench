@@ -15,12 +15,12 @@ from qtb.canonical import read_json, write_json
 from qtb.cli import main
 from qtb.config import data_root, load_profile
 from qtb.coordinator import costs
-from qtb.coordinator.clean import after_decide, clean, cleanup_blocker
+from qtb.coordinator.clean import after_decide, cleanup_blocker
 from qtb.coordinator.process import run_worker
 from qtb.coordinator.stages import read_state, run_stage
 from qtb.coordinator.storage import read_records
 from qtb.envbuild import build_environment
-from qtb.errors import Contaminated, Incomplete, Precondition, Usage
+from qtb.errors import Contaminated, Incomplete, Usage
 from qtb.evaluator import record
 from qtb.evaluator.cost import validate_bundle
 from qtb.execution import Execution, installed
@@ -30,93 +30,16 @@ from stage_world import QUIET, chain, compile_, verdict
 REQUIREMENT = {"contract": "test-contract/1", "validator": "fake_extension:validate"}
 
 
-class Monitor:
-    """A cost monitor as the stage sees it: a contract, a pre-flight and nothing else."""
-
-    mode, contract = "cores", "test-contract/1"
-
-    def __init__(self, prepare=None):
-        self._prepare = prepare
-        self.prepared = 0
-
-    def prepare(self, comparison):
-        self.prepared += 1
-        if self._prepare:
-            raise self._prepare
 
 
-def noisy_costs(monkeypatch, failures):
-    """Wrap the world's fake cost measurement: the first ``failures`` calls are noisy."""
-    measured = costs.measure_costs
-    calls = []
-
-    def measure(comparison):
-        calls.append(comparison.stage)
-        if len(calls) <= failures:
-            raise Contaminated("interference on the measurement core", {"window": {"index": 3}})
-        return measured(comparison)
-
-    monkeypatch.setattr("qtb.coordinator.costs.measure_costs", measure)
-    return calls
 
 
-def run_cost(root, key, monitor=None):
-    execution = Execution(invocation={"job_key": key}, cost_monitor=monitor)
-    with installed(execution):
-        return run_stage(root, "cost", progress=QUIET)
 
 
-def test_contamination_ends_cost_noisy_and_a_later_invocation_completes(world, monkeypatch):
-    root, _ = compile_(world)
-    chain(root, ("quality", "correctness"))
-    noisy_costs(monkeypatch, failures=1)
-    assert run_cost(root, "attempt-1") == 42
-    state = read_state(root, "cost")
-    assert state["status"] == "noisy" and state["format"] == "qtb-stage/2"
-    assert state["invocation"] == {"job_key": "attempt-1"}
-    assert state["contamination"] == {"window": {"index": 3}}
-    # Nothing measured by a noisy invocation is committed.
-    code, decision = verdict(root)
-    assert (code, decision["status"]) == (30, "INCONCLUSIVE")
-    notes = " ".join(decision["notes"])
-    assert "no clean measurement" in notes and "not an observed regression" in notes
-    assert "cost (noisy)" in notes
-    with pytest.raises(Precondition, match="noisy"):
-        clean(root, progress=QUIET)
-    assert after_decide(root, decision, progress=QUIET)["status"] == "skipped"
-    assert run_cost(root, "attempt-2") == 0
-    state = read_state(root, "cost")
-    assert state["status"] == "complete" and state["invocation"] == {"job_key": "attempt-2"}
-    assert "contamination" not in state and state["attempts"] == 2
-    history = read_records(root / "stages/cost/invocations.jsonl")
-    assert [(h["status"], h["exit"], h["invocation"]["job_key"]) for h in history] == [
-        ("noisy", 42, "attempt-1"),
-        ("complete", 0, "attempt-2"),
-    ]
-    assert verdict(root)[1]["status"] == "PASS"
 
 
-def test_a_refused_preflight_changes_nothing_and_a_noisy_one_is_recorded(world):
-    root, _ = compile_(world)
-    chain(root, ("quality", "correctness"))
-    with pytest.raises(Precondition, match="no exclusive cores"):
-        run_cost(root, "a1", Monitor(prepare=Precondition("no exclusive cores")))
-    assert read_state(root, "cost") is None
-    idle = Contaminated("idle probe saw foreign activity", {"phase": "idle probe"})
-    assert run_cost(root, "a2", Monitor(prepare=idle)) == 42
-    assert read_state(root, "cost")["contamination"] == {"phase": "idle probe"}
-    monitor = Monitor()
-    assert run_cost(root, "a3", monitor) == 0 and monitor.prepared == 1
 
 
-def test_a_gate_closed_cost_skips_without_its_monitor(world):
-    world.knobs.ratio = 1.0
-    root, _ = compile_(world)
-    chain(root, ("quality", "correctness"))
-    monitor = Monitor(prepare=Precondition("never asked"))
-    assert run_cost(root, "a1", monitor) == 0
-    assert read_state(root, "cost")["status"] == "skipped" and monitor.prepared == 0
-    assert read_state(root, "cost")["invocation"] == {"job_key": "a1"}
 
 
 def test_contamination_is_never_recorded_as_unresolved_panel_evidence(monkeypatch):
@@ -202,22 +125,6 @@ def test_contaminated_collection_keeps_its_partial_session_and_writes_no_bundle(
     assert read_json(marker) == {"reason": "noise", "window": {"index": 0}}
 
 
-def test_a_session_records_its_requirements_and_refuses_unmonitored_cost(world):
-    with installed(Execution(session={"cost_evidence": REQUIREMENT})):
-        root, code = compile_(world)
-    assert code == 0
-    run = read_json(root / "run.json")
-    assert run["format"] == "qtb-run/3" and run["cost_evidence"] == REQUIREMENT
-    chain(root, ("quality", "correctness"))
-    assert main(["cost", "--results-root", str(root)]) == 41
-    with pytest.raises(Precondition, match="test-contract/1"):
-        run_cost(root, "a1", None)
-    assert run_cost(root, "a2", Monitor()) == 0
-    # A resumed compile may not change what the session requires.
-    other = dict(REQUIREMENT, contract="other/1")
-    with installed(Execution(session={"cost_evidence": other})):
-        with pytest.raises(Usage, match="cost_evidence"):
-            compile_(world)
 
 
 def test_required_evidence_extensions_must_exist_and_implement_the_contract(
@@ -283,7 +190,7 @@ def fake_worker(tmp_path, pause):
     )
     path.chmod(0o755)
     manifest, _, _ = load_profile("iterations-profile", verify=False)
-    case = next(c for c in manifest["cases"] if c["case_id"] == "T1")
+    case = manifest["cases"][0]
     job = dict(
         mode="quality", case=case, seeds=[0, 1, 2, 3], fixture_root=str(data_root() / "fixtures")
     )
@@ -423,7 +330,7 @@ def test_cleanup_is_skipped_while_a_required_stage_has_not_run(world, capsys):
     chain(root, ("quality",))
     assert main(["decide", "--results-root", str(root)]) == 30
     err = capsys.readouterr().err
-    assert "Cleanup skipped: unfinished stages: correctness (not started)" in err
+    assert "Cleanup skipped: unfinished stages: benchpress (not started)" in err
     assert not (root / "clean.json").exists()
     state = read_state(root, "quality")
     write_json(root / "stages/quality/state.json", dict(state, status="running"))
@@ -467,18 +374,25 @@ def test_stage_records_carry_the_execution_scheduler_record(world):
         assert run_stage(root, "quality", progress=QUIET) == 0
     state = read_state(root, "quality")
     assert state["scheduler"] == scheduler and state["workers"] == 3
-    assert record("x", "cost", "passed")  # the evaluator is untouched by the context
+    assert record("x", "completeness", "passed")  # the evaluator is untouched by the context
 
 
-def test_decide_labels_which_cost_evidence_the_verdict_rests_on(tmp_path):
-    from qtb.coordinator.decide import _cost_evidence_note
 
-    run = {}
-    assert "machine mode" in _cost_evidence_note(tmp_path, run)
-    write_json(tmp_path / "cost/timing/screen.json", {"measurement_mode": "cores"})
-    assert "no monitoring evidence was validated" in _cost_evidence_note(tmp_path, run)
-    write_json(tmp_path / "cost/preset/normal.json", {"complete": True})
-    assert "unmonitored" in _cost_evidence_note(tmp_path, run)
-    assert "monitored (test-contract/1)" in _cost_evidence_note(
-        tmp_path, {"cost_evidence": REQUIREMENT}
-    )
+
+def test_active_measurement_stages_do_not_prepare_a_legacy_cost_monitor(world):
+    root, _ = compile_(world)
+    monitor = SimpleNamespace(prepare=lambda _: pytest.fail("host-load monitor must not run"))
+    with installed(Execution(cost_monitor=monitor)):
+        assert chain(root, ("quality", "benchpress")) == {"quality": 0, "benchpress": 0}
+    assert read_state(root, "quality")["status"] == "complete"
+    assert read_state(root, "benchpress")["status"] == "complete"
+
+
+def test_compile_preserves_execution_session_fields_on_resume(world):
+    with installed(Execution(session={"scheduler_run": "run-1"})):
+        root, code = compile_(world)
+    assert code == 0
+    assert read_json(root / "run.json")["scheduler_run"] == "run-1"
+    with installed(Execution(session={"scheduler_run": "run-2"})):
+        with pytest.raises(Usage, match="scheduler_run"):
+            compile_(world)

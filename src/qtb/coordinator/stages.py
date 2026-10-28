@@ -1,37 +1,11 @@
 """Separately runnable stages over one session directory.
 
-::
+Compile builds both revisions. Quality measures circuit quality and paired runtime.
+Benchpress independently compares the pinned external panel at levels 2 and 3.
+Optional upstream unit tests run when the quality gate opens.
 
-    compile -> quality -> gate open? -- no -> correctness, unit-tests, cost record "skipped"
-                            | yes
-                   correctness   [unit-tests]     (unit-tests is optional)
-                        |
-                      cost                        (skipped if correctness found a failure)
-
-Each stage owns ``stages/<stage>/``: ``state.json``, ``evidence.json`` and ``progress.log``,
-plus its own output files. ``run.json`` is written only by ``compile``, and appended to only
-by ``amend_cost`` (``qtb.coordinator.amend``), which re-pins an unfinished cost stage to a
-later harness and records why. ``decide`` merges the
-evidence of committed stages; ``state.json: complete`` is the commit marker.
-
-Every stage takes a shared session lifecycle lock and an exclusive stage lock, checks that the
-session is not cleaned, loads ``run.json`` with the harness check of ``Comparison.open``,
-checks its store entry, its prerequisites, the gate and the host, and only then writes
-``running``. A finished stage (``complete`` or ``skipped``) never runs again in its session;
-a ``running`` (killed), ``failed`` or ``noisy`` stage resumes.
-
-``noisy`` means a measurement extension positively detected interference and aborted the
-stage (``Contaminated``). It is unfinished, like ``running``: nothing it measured is
-committed, ``decide`` treats it as pending and ``clean`` refuses the session. Whether to run
-the stage again is decided by whoever orchestrates it, never here.
-
-The stage runs under the installed ``qtb.execution`` context, which supplies the scheduler
-record, the worker count and the invocation identity. Each state records its invocation,
-and every invocation's outcome is appended to ``stages/<stage>/invocations.jsonl``.
-
-A stage's exit status reports whether it ran, not what it found: 0 for ``complete`` or
-``skipped``, 40 when the stage failed, 41 when a precondition is not met, 42 when it ended
-``noisy``, 64 for usage.
+Each stage commits its evidence with a complete state under stages/<stage> and can
+resume after failure. Session and stage locks protect execution and cleanup.
 """
 
 import time
@@ -40,34 +14,32 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from qtb import execution
-from qtb.canonical import digest, file_hash, read_json, write_json
+from qtb.canonical import file_hash, read_json, write_json
 from qtb.coordinator import (
     Comparison,
-    cost_stage_due,
     gate,
     quality_cases,
-    same_build,
     worker_count,
 )
 from qtb.coordinator.amend import effective
+from qtb.coordinator.quality import measure_quality_runtime
 from qtb.coordinator.runlog import step
-from qtb.coordinator.storage import LockBusy, append_record, locked, read_records
+from qtb.coordinator.storage import LockBusy, append_record, locked
 from qtb.coordinator.store import resolve_store
-from qtb.envbuild import SERIAL, host_mismatch
-from qtb.errors import Contaminated, HarnessError, Incomplete, Precondition, Usage
+from qtb.envbuild import host_mismatch
+from qtb.errors import Contaminated, HarnessError, Precondition, Usage
 from qtb.evaluator import evaluate_quality, record
 from qtb.reporter import write_quality_report
 from qtb.reporter.stage_details import write_stage_report
 
-STAGE_ORDER = ("compile", "quality", "correctness", "unit-tests", "cost")
+STAGE_ORDER = ("compile", "quality", "benchpress", "unit-tests")
 PREREQUISITES = {
     "compile": (),
     "quality": ("compile",),
-    "correctness": ("quality",),
+    "benchpress": ("compile",),
     "unit-tests": ("quality",),
-    "cost": ("correctness",),
 }
-GATED = {"correctness", "unit-tests", "cost"}
+GATED = {"unit-tests"}
 FINAL = {"complete", "skipped"}
 # Started and not finished: a killed invocation (running) or a contaminated one (noisy).
 UNFINISHED = {"running", "noisy"}
@@ -169,6 +141,8 @@ def quality_body(comparison):
         comparison.audit(cases, rows)
     with step(comparison, "Aggregate checks"):
         comparison.aggregate_checks(cases, rows)
+    with step(comparison, "Quality runtime (paired baseline/evolved)"):
+        rows = measure_quality_runtime(comparison, cases, rows)
     records, required_ids, summaries = evaluate_quality(
         comparison.manifest,
         comparison.policy,
@@ -182,6 +156,7 @@ def quality_body(comparison):
         if id_ in {
             "harness/roundtrip",
             "audit/determinism",
+            "quality/runtime",
             f"{prefix}1/C0",
             f"{prefix}1/C6",
         }
@@ -205,110 +180,6 @@ def quality_body(comparison):
     }
 
 
-def baseline_correctness_key(run, policy, machine, verifier_identity, fixtures):
-    """Store key of the baseline correctness half, or ``None`` when it must be recomputed."""
-    from qtb.coordinator.checks import clifford_settings
-
-    if not run.get("store") or same_build(run.get("builds", {})):
-        return None
-    prefix = "CA" if run["profile"] == "confirm-profile" else "IA"
-    return digest(
-        {
-            "build": run["builds"]["baseline"]["id"],
-            "implementation": run["hashes"].get("implementation"),
-            "harness": run["hashes"].get("harness"),
-            "suite": file_hash(Path(fixtures) / "correctness-suite.json"),
-            "manifest": run["hashes"]["manifest"],
-            "policy": run["hashes"]["policy"],
-            "verifier": verifier_identity,
-            "machine_cpu": machine.get("cpu"),
-            "worker_environment": SERIAL,
-            "clifford": list(clifford_settings(policy, prefix)),
-            "tolerances": policy.get("tolerances"),
-        }
-    )
-
-
-def is_baseline_correctness(id_, prefix):
-    return id_.startswith(("behavior/baseline/", "api/baseline/", "C7/baseline/")) or id_ in {
-        f"{prefix}1/C1-C5/baseline",
-        "baseline/preflight",
-    }
-
-
-def correctness_body(comparison):
-    from qtb.coordinator.checks import behavior_checks, clifford_checks
-
-    # A retry restarts the suites; the verifier cache makes repeated checks cheap.
-    for name in ("correctness.jsonl", "clifford.jsonl"):
-        (comparison.directory / name).unlink(missing_ok=True)
-    comparison.reset_evidence()
-    cases = quality_cases(comparison.manifest)
-    key = baseline_correctness_key(
-        comparison.run,
-        comparison.policy,
-        comparison.machine,
-        comparison.verifier_identity(),
-        comparison.fixtures,
-    )
-    entry = comparison.store.read_results("correctness", key) if key else None
-    reused = {}
-    if entry is not None:
-        comparison.progress(f"Baseline correctness: from the store (key {key[:12]}).")
-        for line in read_records(entry / "rows.jsonl"):
-            append_record(comparison.directory / line["file"], dict(line["row"], cached_from=key))
-        for row in read_json(entry / "evidence.json"):
-            comparison.evidence(dict(row, cached_from=key))
-        reused["baseline_correctness"] = key
-    else:
-        with step(comparison, "C1-C5 suite (baseline)"):
-            decisive = behavior_checks(comparison, revisions=("baseline",))
-        with step(comparison, "C7 Clifford variants (baseline)"):
-            decisive &= clifford_checks(comparison, cases, revisions=("baseline",))
-        baseline_bad = any(
-            r["subject"] == "reference" and r["result"] == "failed" for r in comparison.records
-        )
-        comparison.evidence(
-            record(
-                "baseline/preflight",
-                "correctness",
-                "failed" if baseline_bad else "passed",
-                "reference",
-            )
-        )
-        if key and decisive:
-            store_baseline_correctness(comparison, key)
-    preflight = next(r for r in comparison.records if r["id"] == "baseline/preflight")
-    if preflight["result"] == "failed":
-        comparison.progress("The baseline failed its correctness preflight; evolved not checked.")
-        return {"reused": reused}
-    with step(comparison, "C1-C5 suite (evolved)"):
-        behavior_checks(comparison, revisions=("evolved",))
-    with step(comparison, "C7 Clifford variants (evolved)"):
-        clifford_checks(comparison, cases, revisions=("evolved",))
-    return {"reused": reused}
-
-
-def store_baseline_correctness(comparison, key):
-    """Publish the baseline rows and records; only called when every check was decisive."""
-    rows = [
-        {"file": name, "row": row}
-        for name in ("correctness.jsonl", "clifford.jsonl")
-        for row in read_records(comparison.directory / name)
-        if row.get("revision") == "baseline"
-    ]
-    records = [r for r in comparison.records if is_baseline_correctness(r["id"], comparison.prefix)]
-
-    def fill(partial, _final):
-        for row in rows:
-            append_record(partial / "rows.jsonl", row)
-        write_json(partial / "evidence.json", records)
-
-    comparison.store.publish_results(
-        "correctness", key, fill, {"session": str(comparison.directory)}
-    )
-
-
 def unit_tests_body(comparison):
     from qtb.coordinator.upstream import baseline_unit_tests_key, upstream_checks
 
@@ -320,66 +191,27 @@ def unit_tests_body(comparison):
     return {"reused": {"baseline_unit_tests": key} if cached else {}}
 
 
-def cost_due(root, run, manifest, policy):
-    """``cost_stage_due`` over the committed compile, quality and correctness evidence."""
-    rows = read_records(Path(root) / "observations.jsonl")
-    evidence = [
-        row
-        for stage in ("compile", "quality", "correctness")
-        for row in committed_evidence(root, stage)
-    ]
-    records, _, _ = evaluate_quality(manifest, policy, rows, evidence)
-    return cost_stage_due(run["builds"], records)
-
-
 def skip_reason(root, stage, run=None, manifest=None, policy=None):
-    """Why a gated stage records ``skipped`` instead of running, or ``None``.
-
-    Callable without a ``Comparison``, in which case the session's archived profile is read.
-    """
+    """Only optional unit tests are gated by the quality result."""
+    if stage not in GATED:
+        return None
     quality = read_state(root, "quality")
-    if quality is None or quality["status"] != "complete":
-        return None
-    if quality.get("gate") == "closed":
+    if quality and quality["status"] == "complete" and quality.get("gate") == "closed":
         return f"gate closed: {quality.get('gate_reason')}"
-    if stage != "cost":
-        return None
-    correctness = read_state(root, "correctness")
-    if correctness is None or correctness["status"] != "complete":
-        return None
-    if run is None:
-        run = read_json(Path(root) / "run.json")
-        manifest = read_json(Path(root) / "manifest.json")
-        policy = read_json(Path(root) / "policy.json")
-    if not cost_due(root, run, manifest, policy):
-        return "correctness found a failure"
     return None
 
 
-def cost_body(comparison):
-    from qtb.coordinator.costs import measure_costs
+def benchpress_body(comparison):
+    from qtb.coordinator.benchpress import benchpress_body as run_benchpress
 
-    # Every panel is judged again: saved bundles are reused, records are not.
-    comparison.reset_evidence()
-    due = cost_due(comparison.directory, comparison.run, comparison.manifest, comparison.policy)
-    if due == "aa":
-        comparison.progress("Identical builds: measuring cost panels as an A/A check.")
-    with step(comparison, "Cost panels (timing/memory)"):
-        try:
-            measure_costs(comparison)
-        except Incomplete as exc:
-            comparison.evidence(
-                record(f"{comparison.prefix}5/timing", "cost", "unresolved", detail=str(exc))
-            )
-    return {"cost_due": due}
+    return run_benchpress(comparison)
 
 
 BODIES = {
     "compile": compile_body,
     "quality": quality_body,
-    "correctness": correctness_body,
+    "benchpress": benchpress_body,
     "unit-tests": unit_tests_body,
-    "cost": cost_body,
 }
 
 
@@ -441,17 +273,6 @@ def _skip(comparison, previous, reason):
     return EXIT_OK
 
 
-def _check_cost_measurement(comparison):
-    """A session that requires monitored cost evidence is measured only under its monitor."""
-    requirement = comparison.run.get("cost_evidence")
-    monitor = execution.current().cost_monitor
-    if requirement and getattr(monitor, "contract", None) != requirement.get("contract"):
-        raise Precondition(
-            f"This session admits only cost evidence of {requirement.get('contract')}; "
-            f"run cost through its measurement entry point ({requirement.get('entry_point')})"
-        )
-
-
 def _preconditions(comparison, previous):
     """Store, prerequisites, gate and host; returns an exit code when the stage ends here."""
     root, stage = comparison.directory, comparison.stage
@@ -483,8 +304,6 @@ def _preconditions(comparison, previous):
             problem = host_mismatch(build)
             if problem:
                 raise Precondition(f"This host cannot run the {revision} build: {problem}")
-    if stage == "cost":
-        _check_cost_measurement(comparison)
     return None
 
 
@@ -504,25 +323,12 @@ def _execute(comparison, previous, progress):
         "inputs": _inputs(comparison),
         "workers": worker_count(),
     }
-    monitor = execution.current().cost_monitor if stage == "cost" else None
-    prepared = None
-    if monitor is not None:
-        # The monitor checks the allocation and probes the idle measurement core before any
-        # timed worker runs. A refused allocation leaves the state as it was.
-        try:
-            monitor.prepare(comparison)
-        except Precondition:
-            raise
-        except Exception as exc:  # ends the invocation noisy or failed, like the body
-            prepared = exc
     _write_state(root, stage, state)
     # The retried attempt's crash record is gone from memory; commit that now.
     write_json(comparison.evidence_path, comparison.records)
     try:
-        if prepared is not None:
-            raise prepared
         fields = BODIES[stage](comparison)
-        if stage in GATED:
+        if stage in {"benchpress", "unit-tests"}:
             write_stage_report(
                 root, stage, comparison.run, dict(state, **fields, status="complete"),
                 comparison.records, comparison.policy,

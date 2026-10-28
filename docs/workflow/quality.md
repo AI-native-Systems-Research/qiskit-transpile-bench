@@ -1,7 +1,6 @@
 # 2. quality
 
-[Documentation index](../README.md) · [← compile](compile.md) · [correctness
-→](correctness.md)
+[Documentation index](../README.md) · [← compile](compile.md) · [Benchpress →](benchpress.md)
 
 Measure circuit quality, check the compiled outputs and compute the gate for the expensive
 stages.
@@ -12,8 +11,7 @@ stages.
 uv run qiskit-transpile-bench quality --results-root "$S"
 ```
 
-`S` is the session directory chosen at `compile`. `compile` must be complete. This stage can
-use a busy host. See [session rules](../sessions.md) for prerequisites, retries and stage
+`S` is the session directory chosen at `compile`. `compile` must be complete. Use an idle machine for the paired runtime measurements. See [session rules](../sessions.md) for prerequisites, retries and stage
 exit codes.
 
 ## Collect quality observations
@@ -34,10 +32,9 @@ guards. [Metrics](../metrics.md) defines the estimators, weights and thresholds.
 | Completeness | All required observations and checks must exist |
 
 Confirm version 12 removes C1-lite: quality does not run statevector equivalence checks.
-Semantic verification remains in the correctness stage.
+The standalone semantic correctness stage is removed.
 
-See [verifier checks](../verifier.md#the-checks) for the contracts and eligibility rules. The
-compile times of these concurrent jobs never enter the cost verdict.
+See [verifier checks](../verifier.md#the-checks) for the contracts and eligibility rules. A separate uninstrumented pass over the same cases and seeds supplies runtime measurements.
 
 ### One compile per seed
 
@@ -77,8 +74,7 @@ output and its metrics stand, and C6 is `unverified` for that seed.
 
 A seed that exceeds its case's `timeout_s` is killed and compiled once more, alone, in a fresh
 process; the later seeds of the batch run in another. The retry does not wait for a quiet
-host: quality runs many tasks at once on a loaded host by design, and only the
-[cost](cost.md) stage gates on host load. A baseline seed that still fails is a failed
+host. A baseline seed that still fails is a failed
 reference record (`INCONCLUSIVE`). A candidate seed is `failed` only when it timed out twice
 and the same baseline seed completed without a retry within `baseline_fraction` (0.5) of the
 timeout (`quality_timeout` in the policy). The paired baseline, compiled on the same host
@@ -121,7 +117,7 @@ artifacts survive `clean`; stored proofs own separate copies outside the session
 or changed proof artifacts leave the audit unresolved. After an unresolved audit the
 matching baseline quality entries in the store are
 marked invalid (`invalidated.json`) and never reused; stored correctness and unit-test results
-are kept. Evolved observations are never stored.
+are historical. Evolved observations are never stored.
 
 ## Failures both revisions share
 
@@ -135,32 +131,29 @@ recorded as a failure; and the aggregate (`CA1/C6`, for example) stays `unresolv
 the pair under `shared_failures`. Any other candidate failure, on another seed or with another
 witness, remains a `CONSTRAINT_VIOLATION`.
 
+## Paired runtime
+
+After quality checks and auditing finish, both revisions run every quality case and B0 seed
+again without taps or traces. Workers run sequentially, with arm order alternating across
+cases. A warmup runs once per case/revision, then one `transpile` call is timed per seed.
+Imports, fixture loading, export and checks are outside the timed region.
+
+Timing always uses fresh calls for both builds, even when baseline quality came from the
+store. Session-local paired checkpoints under `stages/quality/runtime/` allow retries.
+There is no host-load filtering, waiting for idle cores, or busy-machine adjustment.
+Incomplete timing leaves `quality/runtime` unresolved. Runtime differences are descriptive;
+they do not use the retired cost guards.
+
+Reports show per-case mean baseline/evolved seconds, evolved-minus-baseline seconds,
+ratio and improvement percentage. They also show the total paired workload and aggregate
+case ratio. Missing and failed samples are counted; incomplete totals are unavailable.
+
 ## The quality gate
 
-At the end of `quality`, the gate decides whether the expensive stages run. It is stored in
-`stages/quality/state.json` with its reason, and cannot be overridden.
-
-| Gate | When | Then |
-| --- | --- | --- |
-| `improved` | Every quality check passed (round-trip, audit, C0, C6, guards, caps, completeness) and every improvement record passed | `correctness`, `unit-tests` and `cost` run |
-| `aa` | Both builds have the same ID (an A/A session) and every quality check passed | They run as a check of the harness; the cost panels are the known-outcome check |
-| `closed` | Anything else: no improvement, an unresolved improvement, or a failed or unresolved quality check | They record `skipped` with the reason and exit 0 within seconds |
-
-`cost` checks once more: if `correctness` found a failure, `cost` records `skipped`.
-
-**What `NO_IMPROVEMENT` checks.** Both revisions built and compiled identical inputs, no
-quality check failed, and the candidate showed no gain beyond seed noise. **It does not
-check correctness.** With the gate closed, the C1–C5 suite, the API contracts, the C7
-Clifford checks, the upstream tests and the cost panels never run, so an incorrect candidate
-without an improvement also ends `NO_IMPROVEMENT`. The report says so: "Correctness, unit
-tests and cost not checked: the quality gate is closed". It also says whether the baseline's
-correctness is known from the store. A failed quality check (C0, C6 or a guard) still gives
-`CONSTRAINT_VIOLATION`, without the correctness suite.
-
-If the baseline itself fails its correctness checks, the evolved revision is not checked,
-the quality evidence is set aside, and the verdict is `INCONCLUSIVE`. Without an
-improvement, correctness never runs, so a broken baseline is found by the first session
-against it that gets through the gate.
+The gate controls optional upstream unit tests only. `improved` means quality improvement
+and all quality checks passed; `aa` allows identical builds to run tests as a harness check.
+Otherwise the gate is `closed` and unit tests record `skipped`.
+Benchpress runs regardless of this gate. There are no correctness or cost follow-up stages.
 
 ## Outputs and retries
 
@@ -175,7 +168,7 @@ instance-bootstrap and held-out estimates when available.
 The JSON report (`qtb-quality-report/1`) exposes `overall`, `families`, `trade_score`,
 `constraint_counts`, `quality_guard_tolerances`, all evaluator `summaries` (including
 per-seed log differences),
-`quality_comparison`, constraints and provenance. Missing or invalid estimates are marked
+`quality_comparison`, `runtime_comparison`, constraints and provenance. Missing or invalid estimates are marked
 unavailable; they are never treated as passing scores. Scores use the frozen geometric
 weighting, with lower ratios better; arithmetic means are descriptive. Iterations family
 and marginal summaries are report-only and introduce no additional guards.

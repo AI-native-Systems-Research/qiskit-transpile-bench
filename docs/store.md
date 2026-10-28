@@ -2,12 +2,15 @@
 
 [Documentation index](README.md) · [compile](workflow/compile.md) · [Sessions](sessions.md)
 
+Current sessions never publish or consume the historical `correctness/` entries described
+below. Benchpress and both arms of quality runtime use session-local measurements.
+
 ## Reuse and keys
 
 The store holds baseline data only: baseline builds and the baseline results of quality,
-correctness and unit tests. Many sessions, on several hosts, can use one store at once.
+and unit tests. Many sessions, on several hosts, can use one store at once.
 Nothing about the evolved tree is written to it: not the evolved build, the verifier, the
-verifier cache, evolved observations or any cost sample. Cost samples are never stored,
+verifier cache, evolved observations or any runtime sample. Runtime samples are never stored,
 because both arms must be measured in one session.
 
 `compile` takes the store from `--store` or, when the flag is absent, `QTB_STORE`. The flag

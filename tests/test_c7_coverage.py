@@ -67,7 +67,7 @@ def test_stage_coverage_reads_c7_results():
     ]
     run = {"scope": {"1": {"stages": ["optimization"], "components": []}}}
 
-    # decide computes it once quality and correctness are both complete.
+    # Archived evidence can still be inspected with the coverage helper.
     result = stage_coverage(run, [case], observations, [], "IA")
     assert result["id"] == "IA1/stage-coverage"
     assert result["result"] == "unresolved"

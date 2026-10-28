@@ -1,4 +1,4 @@
-"""Quality-stage building blocks that never import Qiskit and never touch session state.
+"""Quality-stage building blocks and runtime orchestration that never import Qiskit.
 
 The functions here run in a pool of harness processes (``check_batch``, ``audit_check``):
 C0, the C6 routing replay and the layout comparison read the files a worker wrote, so the
@@ -10,18 +10,23 @@ audit.
 """
 
 import hashlib
+import math
 import threading
 from collections import defaultdict
 from concurrent.futures import Future
+from pathlib import Path
 
 from qtb.canonical import (
+    atomic_bytes,
     canonical_bytes,
     circuit_hash,
     circuit_lines,
     digest,
     read_circuit,
     read_json,
+    write_json,
 )
+from qtb.config import case_hash
 from qtb.errors import HarnessError
 from qtb.metrics import StructuralChecker, layout_errors
 from qtb.metrics.replay import replay
@@ -35,6 +40,137 @@ SNAPSHOT_STAGES = ("init", "routing")
 # can move a used qubit as well. The audit accepts a difference that starts at one of
 # them, and only as a proven physical-wire permutation.
 VF2_TIE_PASSES = ("VF2Layout", "VF2PostLayout")
+
+
+RUNTIME_PROTOCOL = {
+    "mode": "timing_e2e",
+    "warmups": 1,
+    "warmups_once": True,
+    "minimum_calls": 1,
+    "minimum_ns": 0,
+}
+
+
+def runtime_ns(result):
+    """The mean of valid successful samples, never a cached quality compile duration."""
+    if not isinstance(result, dict):
+        return None
+    samples = result.get("samples_ns", [])
+    if result.get("status") != "ok" or not isinstance(samples, list) or not samples or not all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(value) and value > 0
+        for value in samples
+    ):
+        return None
+    return sum(samples) / len(samples)
+
+
+def _complete_runtime_pair(pair, seeds):
+    """Only a complete successful pair may survive a resumed quality attempt."""
+    if not isinstance(pair, dict) or set(pair) != {"baseline", "evolved"}:
+        return False
+    expected = set(seeds)
+    for rows in pair.values():
+        if not isinstance(rows, list) or len(rows) != len(expected):
+            return False
+        if any(not isinstance(row, dict) or type(row.get("seed")) is not int for row in rows):
+            return False
+        if {row["seed"] for row in rows} != expected:
+            return False
+        if any(runtime_ns(row) is None for row in rows):
+            return False
+    return True
+
+
+def measure_quality_runtime(comparison, cases, observations):
+    """Time both builds freshly over every quality case and its complete B0 seed block.
+
+    Each case runs in two sequential workers; their order alternates across cases. Workers
+    warm up once, then time one uninstrumented ``transpile`` per seed. Imports, input
+    loading, output export and quality checks are outside the timed region. No host-load
+    check or interference correction is applied. Only this session's paired checkpoints
+    are reused, so a stored baseline quality result never supplies a runtime sample.
+    """
+    from qtb.evaluator import record
+
+    measured = {}
+    builds = {revision: comparison.run["builds"][revision]["id"]
+              for revision in ("baseline", "evolved")}
+    directory = Path(comparison.directory) / "stages" / "quality" / "runtime"
+    comparison.progress(
+        f"Quality runtime: {len(cases)} cases, "
+        f"{sum(case['seeds_per_block'] for case in cases)} paired seeds, sequential workers."
+    )
+    for index, case in enumerate(cases):
+        identity = {
+            "format": "qtb-quality-runtime/1", "case_id": case["case_id"],
+            "case_hash": case_hash(case),
+            "builds": builds, "protocol": RUNTIME_PROTOCOL,
+        }
+        path = directory / f"{digest(identity)}.json"
+        seeds = range(case["seeds_per_block"])
+        pair = None
+        if path.exists():
+            saved = read_json(path)
+            if saved.get("identity") != identity:
+                raise HarnessError(f"Quality runtime checkpoint identity mismatch: {path}")
+            pair = saved.get("results")
+        if not _complete_runtime_pair(pair, seeds):
+            # Retake both arms together: a successful old baseline must never be paired
+            # with a new evolved timing after a transient failure or partial checkpoint.
+            pair = {}
+            order = ("baseline", "evolved") if index % 2 == 0 else ("evolved", "baseline")
+            for revision in order:
+                pair[revision] = comparison.job(
+                    revision, case, "timing_e2e", seeds,
+                    options={key: value for key, value in RUNTIME_PROTOCOL.items()
+                             if key != "mode"},
+                )
+            write_json(path, {"identity": identity, "results": pair})
+        for revision, results in pair.items():
+            for result in results:
+                key = (case["case_id"], revision, result["seed"])
+                if key in measured:
+                    raise HarnessError(f"Duplicate quality runtime result: {key}")
+                measured[key] = result
+        comparison.progress(
+            f"Quality runtime {index + 1}/{len(cases)}: {case['case_id']} "
+            f"({case['seeds_per_block']} paired seeds)."
+        )
+    expected = {
+        (case["case_id"], revision, seed)
+        for case in cases for revision in ("baseline", "evolved")
+        for seed in range(case["seeds_per_block"])
+    }
+    if set(measured) - expected:
+        raise HarnessError("Quality runtime returned unrequested results")
+    missing, failed = [], []
+    for key in sorted(expected):
+        if key not in measured:
+            missing.append(list(key))
+        elif runtime_ns(measured[key]) is None:
+            failed.append(list(key))
+    for row in observations:
+        key = (row["case_id"], row["revision"], row["seed"])
+        row.pop("runtime_ns", None)
+        row.pop("runtime_measurement", None)
+        if key in measured:
+            row["runtime_measurement"] = measured[key]
+            value = runtime_ns(measured[key])
+            if value is not None:
+                row["runtime_ns"] = value
+    atomic_bytes(
+        Path(comparison.directory) / "observations.jsonl",
+        b"".join(canonical_bytes(row) + b"\n" for row in observations),
+    )
+    comparison.evidence(record(
+        "quality/runtime", "completeness", "unresolved" if missing or failed else "passed",
+        expected_samples=len(expected), measured_samples=len(expected) - len(missing) - len(failed),
+        missing_count=len(missing), failed_count=len(failed), missing=missing, failed=failed,
+        detail=(f"{len(missing)} missing and {len(failed)} failed runtime samples"
+                if missing or failed else "Fresh paired runtimes cover the full quality panel"),
+    ))
+    return observations
 
 
 def routing_replay_seeds(case, seeds):
