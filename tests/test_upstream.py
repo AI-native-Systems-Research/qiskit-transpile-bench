@@ -47,7 +47,10 @@ def test_upstream_time_budgets_are_frozen_and_used(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr("qtb.coordinator.upstream.run_logged", logged)
-    build = {"toolchain_channel": "stable", "environment": str(tmp_path / "env")}
+    build = {
+        "toolchain_channel": "stable", "environment": str(tmp_path / "env"),
+        "python": sys.executable,
+    }
     rust = rust_suite(build, tmp_path / "rust", 10800)
     assert rust["completed"] and rust["passed"] == ["a::b"] and rust["failed"] == ["a::c"]
     assert rust["tests"] == [
@@ -56,6 +59,25 @@ def test_upstream_time_budgets_are_frozen_and_used(tmp_path, monkeypatch):
         {"nodeid": "a::d", "outcome": "skipped"},
     ]
     assert seen == {"python": 14400, "rust": 10800}
+
+
+def test_rust_suite_uses_build_python_instead_of_inherited_pyo3_python(tmp_path, monkeypatch):
+    python = str(tmp_path / "build" / "env" / "bin" / "python")
+    build = {
+        "toolchain_channel": "stable", "environment": str(tmp_path / "build" / "env"),
+        "python": python,
+    }
+    monkeypatch.setenv("PYO3_PYTHON", "/unrelated/system/python3.9")
+
+    def logged(command, cwd, env, log, timeout):
+        assert command[:2] == ["cargo", "test"]
+        assert cwd == tmp_path / "build" / "source"
+        assert env["PYO3_PYTHON"] == python
+        log.write_text("test example ... ok\ntest result: ok. 1 passed\n")
+
+    monkeypatch.setattr("qtb.coordinator.upstream.run_logged", logged)
+    result = rust_suite(build, tmp_path / "rust", 60)
+    assert result["completed"] and result["passed"] == ["example"]
 
 
 def test_upstream_runner_survives_spawned_worker_processes(tmp_path, monkeypatch):

@@ -6,9 +6,11 @@ import json
 import math
 from collections import Counter, defaultdict
 from pathlib import Path
+from statistics import median
 
 from qtb.canonical import atomic_bytes, read_json, write_json
 from qtb.coordinator.storage import read_records
+from qtb.reporter.benchpress import benchpress_comparisons
 
 STAGES = ("benchpress", "unit-tests")
 TITLES = {"correctness": "Correctness tests", "unit-tests": "Unit tests", "cost": "Cost tests",
@@ -124,6 +126,8 @@ def make_stage_report(root, stage, run, state, records, policy=None):
     elif stage == "benchpress":
         summary = root / "stages/benchpress/summary.json"
         report["summary"] = read_json(summary) if summary.exists() else None
+        if report["summary"] is not None:
+            report.update(benchpress_comparisons(report["summary"]))
     return report
 
 
@@ -240,6 +244,130 @@ def _cost_lines(report):
     return lines
 
 
+def _benchpress_improvement(ratio):
+    return f"{100 * (1 - ratio):+.2f}%" if ratio is not None else None
+
+
+def _benchpress_overall(cases):
+    rows = []
+    for name in ("D2", "N2"):
+        values = [case["metrics"][name] for case in cases
+                  if case["complete"] and name in case["metrics"]]
+        ratios = [value["ratio"] for value in values if value["ratio"] is not None]
+        rows.append({
+            "optimization_level": "Overall", "metric": name, "complete_cases": len(values),
+            "median_change": median(value["change"] for value in values) if values else None,
+            "geometric_mean_ratio": (
+                0.0 if 0 in ratios else math.exp(math.fsum(map(math.log, ratios)) / len(ratios))
+            ) if ratios else None,
+            "better": sum(value["change"] < 0 for value in values),
+            "equal": sum(value["change"] == 0 for value in values),
+            "worse": sum(value["change"] > 0 for value in values),
+        })
+    return rows
+
+
+def _benchpress_topologies(cases):
+    """Describe saved case ratios without changing the stage's paired estimators."""
+    groups = defaultdict(list)
+    for case in cases:
+        groups[(case["optimization_level"], case["topology"])].append(case)
+    rows = []
+    for (level, topology), group in sorted(groups.items()):
+        complete = [case for case in group if case["complete"]]
+        row = {"optimization_level": level, "topology": topology,
+               "complete_cases": len(complete), "expected_cases": len(group)}
+        for name in ("D2", "N2"):
+            ratios = [case["metrics"].get(name, {}).get("ratio") for case in complete]
+            ratios = [ratio for ratio in ratios if ratio is not None]
+            row[name] = {
+                "ratio_cases": len(ratios),
+                "geometric_mean_ratio": (
+                    0.0 if 0 in ratios else math.exp(math.fsum(map(math.log, ratios)) / len(ratios))
+                ) if ratios else None,
+            }
+        rows.append(row)
+    return rows
+
+
+def _benchpress_test_cells(case):
+    return [case["node_id"].rsplit("::", 1)[-1], case["topology"],
+            case["optimization_level"], case["seed_count"]]
+
+
+def _benchpress_quality_lines(comparison):
+    lines = [
+        "### Quality tests", "",
+        "One row per Benchpress test and optimization level. D2 (two-qubit depth) and N2 "
+        "(two-qubit gate count) are arithmetic means over the test's paired seeds. "
+        "Improvement is 100 × (baseline mean − evolved mean) / baseline mean. These "
+        "descriptive means can differ from the paired-median geometric estimates above.", "",
+        "Missing or invalid seed pairs make that metric unavailable. Percentages with a "
+        "zero baseline are N/A (undefined). Seeds is the expected count per revision.", "",
+    ]
+    if comparison.get("reason"):
+        lines += [_cell(comparison["reason"]), ""]
+    rows = []
+    for case in comparison["cases"]:
+        cells = _benchpress_test_cells(case)
+        for name in ("D2", "N2"):
+            value = case[name]
+            if value["baseline"] is None:
+                cells += [None] * 3
+            else:
+                percent = value["improvement_percent"]
+                cells += [f"{value['baseline']:.2f}", f"{value['evolved']:.2f}",
+                          f"{percent:+.2f}%" if percent is not None else "N/A"]
+        rows.append(cells)
+    return lines + _table(
+        ["Test", "Target", "Level", "Seeds", "Baseline D2", "Evolved D2", "D2 improvement",
+         "Baseline N2", "Evolved N2", "N2 improvement"], rows,
+    )
+
+
+def _benchpress_runtime_lines(comparison):
+    lines = [
+        "### Runtime", "",
+        "Runtime measures a single pm.run(circuit) call, excluding input loading, pass-manager "
+        "construction and validation. No warmup, calibration or machine-load filtering.", "",
+        "Differences are evolved − baseline; negative differences mean faster. "
+        "Improvement is 100 × (baseline − evolved) / baseline. "
+        "Per-test times are arithmetic means over all expected paired seeds.", "",
+    ]
+    if comparison["status"] == "reported":
+        lines += [
+            f"Full-panel measured runtime ({comparison['expected_pairs']} seeds per revision): "
+            f"baseline **{comparison['baseline_seconds']:.6f} s**, "
+            f"evolved **{comparison['evolved_seconds']:.6f} s**; "
+            f"difference **{comparison['difference_seconds']:+.6f} s** "
+            f"({comparison['improvement_percent']:+.2f}% improvement).", "",
+            "Equal-case geometric mean runtime ratio (ratios of seed means): "
+            f"{comparison['case_geomean_ratio']:.6f}×.", "",
+        ]
+    else:
+        lines += ["Full-panel runtime unavailable: "
+                  + _cell(comparison.get("reason", "Missing or invalid seed pairs")) + ".", ""]
+    lines += [
+        f"Paired seeds: {comparison['measured_pairs']} / {comparison['expected_pairs']}; "
+        f"missing samples: {comparison['missing_samples']}; "
+        f"failed samples: {comparison['failed_samples']}.", "",
+    ]
+    rows = []
+    for case in comparison["cases"]:
+        cells = _benchpress_test_cells(case)
+        if case["status"] == "reported":
+            cells += [f"{case['baseline_seconds']:.6f}", f"{case['evolved_seconds']:.6f}",
+                      f"{case['difference_seconds']:+.6f}",
+                      f"{case['improvement_percent']:+.2f}%"]
+        else:
+            cells += [None] * 4
+        rows.append(cells)
+    return lines + _table(
+        ["Test", "Target", "Level", "Seeds", "Baseline (s)", "Evolved (s)",
+         "Difference (s)", "Runtime improvement"], rows,
+    )
+
+
 def _benchpress_lines(report):
     summary = report.get("summary")
     if summary is None:
@@ -248,24 +376,57 @@ def _benchpress_lines(report):
         f"{summary['panel_size']} circuit/target entries; optimization levels 2 and 3; "
         f"seeds {_cell(summary['seeds'])}. "
         f"Complete cases: {summary['complete_cases']}/{summary['expected_cases']}.", "",
+        "### Benchpress improvement", "",
         "Changes are evolved minus baseline; ratios are evolved / baseline. Lower is better. "
-        "Each case uses medians of paired seed measurements. Quality and runtime differences "
-        "are descriptive; no separate Benchpress regression threshold is imposed.", "",
-        "Runtime measures a single pm.run(circuit) call, excluding input loading, pass-manager "
-        "construction and validation. No warmup, calibration or machine-load filtering.", "",
+        "Improvement is 100 × (1 − ratio): positive means better, negative means worse. "
+        "Quality and runtime differences are descriptive; no separate Benchpress regression "
+        "threshold is imposed.", "",
+        "Each case uses the median of its paired seed ratios; geometric means give each "
+        "complete case with a defined ratio equal weight. Zero-baseline ratios are unavailable "
+        "and excluded from geometric means. A zero median change can coexist with a nonzero "
+        "geometric improvement when most cases are unchanged. The quality stage uses a "
+        "different panel, seed blocks and frozen weights, so its overall score is not directly "
+        "comparable.", "",
+        "Overall rows pool the complete cases across levels 2 and 3 with equal case weights.",
+        "",
     ]
+    groups = [row for row in summary["groups"] if row["metric"] in {"D2", "N2"}]
+    groups += _benchpress_overall(summary["cases"])
     lines += _table(["Level", "Metric", "Complete cases", "Median change", "Geomean ratio",
-                     "Better", "Equal", "Worse"], (
+                     "Geomean improvement", "Better", "Equal", "Worse"], (
         (row["optimization_level"], row["metric"], row["complete_cases"], row["median_change"],
-         row["geometric_mean_ratio"], row["better"], row["equal"], row["worse"])
-        for row in summary["groups"]
+         row["geometric_mean_ratio"], _benchpress_improvement(row["geometric_mean_ratio"]),
+         row["better"], row["equal"], row["worse"])
+        for row in groups
     ))
-    lines += ["<details>", "<summary>Every Benchpress case</summary>", ""]
-    lines += _table(["Case", "Level", "Paired seeds", "Metric", "Baseline", "Evolved",
-                     "Change", "Ratio", "Change %"], (
+    comparisons = (
+        report if "quality_comparison" in report and "runtime_comparison" in report
+        else benchpress_comparisons(summary)
+    )
+    lines += _benchpress_quality_lines(comparisons["quality_comparison"])
+    lines += _benchpress_runtime_lines(comparisons["runtime_comparison"])
+    lines += ["### Topology breakdown", "",
+              "Quality improvement by topology (equal case weights within each topology). "
+              "Ratio cases counts the cases with a defined ratio for each metric.", ""]
+    lines += _table(["Level", "Topology", "Complete cases", "D2 ratio cases", "D2 improvement",
+                     "N2 ratio cases", "N2 improvement"], (
+        (row["optimization_level"], row["topology"],
+         f"{row['complete_cases']}/{row['expected_cases']}",
+         row["D2"]["ratio_cases"], _benchpress_improvement(row["D2"]["geometric_mean_ratio"]),
+         row["N2"]["ratio_cases"], _benchpress_improvement(row["N2"]["geometric_mean_ratio"]))
+        for row in _benchpress_topologies(summary["cases"])
+    ))
+    lines += ["<details>", "<summary>Paired-seed statistics and full test IDs</summary>", ""]
+    lines += ["Baseline and evolved columns are independent seed medians. Paired changes and "
+              "ratios are calculated per seed before taking their medians; they need not equal "
+              "the subtraction or division of the displayed baseline and evolved medians. "
+              "Paired improvement is calculated from the median paired ratio.", ""]
+    lines += _table(["Case", "Level", "Paired seeds", "Metric", "Baseline median",
+                     "Evolved median", "Median paired change", "Median paired ratio",
+                     "Paired improvement"], (
         (case["node_id"], case["optimization_level"], case["paired_seeds"], name,
          value.get("baseline"), value.get("evolved"), value.get("change"), value.get("ratio"),
-         value.get("change_pct"))
+         _benchpress_improvement(value.get("ratio")))
         for case in summary["cases"]
         for name, value in (case["metrics"] or {"incomplete": {}}).items()
     ))
@@ -282,10 +443,21 @@ def render_stage_details(report):
         lines += [_cell(report["reason"]), ""]
     if report["status"] != "complete":
         return lines + ["No committed test results. This is not a pass.", ""]
-    lines += _table(["Check", "Subject", "Result", "Details"], (
-        (r["id"], r.get("subject"), r["result"], r.get("detail", ""))
-        for r in report["constraints"]
-    ))
+    if stage == "benchpress":
+        lines += ["### Check results", ""]
+        lines += _table(["Result", "Count"], sorted(Counter(
+            r["result"] for r in report["constraints"]
+        ).items()))
+        lines += ["### Checks needing attention", ""]
+        attention = [r for r in report["constraints"] if r["result"] != "passed"]
+        lines += _table(["Check", "Result", "Details"], (
+            (r["id"], r["result"], r.get("detail", "")) for r in attention
+        )) if attention else ["None.", ""]
+    else:
+        lines += _table(["Check", "Subject", "Result", "Details"], (
+            (r["id"], r.get("subject"), r["result"], r.get("detail", ""))
+            for r in report["constraints"]
+        ))
     lines += {"correctness": _correctness_lines, "unit-tests": _unit_lines,
               "cost": _cost_lines, "benchpress": _benchpress_lines}[stage](report)
     return lines

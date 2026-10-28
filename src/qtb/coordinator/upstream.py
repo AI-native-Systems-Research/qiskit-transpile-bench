@@ -201,6 +201,8 @@ def rust_suite(build, directory, timeout_s, cargo_home=None):
     env = sanitized_environment(
         {
             "RUSTUP_TOOLCHAIN": build["toolchain_channel"],
+            # PyO3 must use this build's interpreter, not a different Python on PATH.
+            "PYO3_PYTHON": build["python"],
             "CARGO_HOME": str(cargo_home),
             "CARGO_TARGET_DIR": str(target),
         }
