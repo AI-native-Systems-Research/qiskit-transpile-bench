@@ -187,25 +187,26 @@ n = 100
 mean, sample_sd (ddof=1), median, q25, q75, iqr, p90, min, max
 ```
 
-Use linear/type-7 quantile interpolation everywhere; the harness `quantile()` helper and NumPy's default `quantile` method already use this convention. For sorted observations `x_(1)..x_(100)`, the interpolation index is `1 + 99*p`:
+Use empirical nearest-rank quantiles: sort the `n` observations and take the value at one-based rank `ceil(n*p)`. With 100 observations:
 
 ```text
-P90 = 0.90*x_(90) + 0.10*x_(91)
+Q25 = x_(25), median = x_(50), Q75 = x_(75), P90 = x_(90)
+IQR = x_(75) - x_(25)
 ```
 
-Record the actual largest observations in tail diagnostics. A quantile convention does not create more tail evidence. [Quantile conventions](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.quantile.html).
+Here median means the empirical 50th percentile, using the lower middle observation for an even sample size. Apply the same rank rule within bootstrap samples and when selecting bootstrap interval endpoints. Record the actual largest observations in tail diagnostics.
 
-![Sorted observations by rank with the P90 interpolation point and its rank confidence interval](figures/fig3_order_statistics.svg)
+![Sorted observations by rank with P90 at the 90th observation and its rank confidence interval](figures/fig3_order_statistics.svg)
 
-*Figure 2. Ranks 81 to 100 of one case and arm. The P90 point estimate interpolates between neighbouring ranks; the rank confidence interval uses actual observations (section 6.4).*
+*Figure 2. Ranks 81 to 100 of one case and arm. P90 is the 90th sorted observation; the rank confidence interval also uses actual observations (section 6.4).*
 
-**Worked example (illustrative values).** For one case and arm, suppose the sorted D2 values have `x_(90) = 1310` and `x_(91) = 1320`:
+**Worked example (illustrative values).** For one case and arm, suppose the 90th sorted D2 value is `x_(90) = 1310`:
 
 ```text
-P90 = 0.90 * 1310 + 0.10 * 1320 = 1311.0
+P90 = x_(90) = 1310
 ```
 
-If instead `x_(90) = x_(91) = 1310`, P90 is exactly 1310 under the declared type-7 convention; ties are common for discrete depth counts, which is why the tail diagnostics keep the actual ranked values.
+Keep ties as observed; repeated depth counts retain their positions in the sorted sample.
 
 Raw per-case distributions remain the foundation. For spread comparisons only, divide SD by each arm's own arithmetic mean and IQR by its own median as defined in section 5.4. Mean, median, and P90 comparisons retain their direct case-ratio definitions; do not normalize the raw outcomes or use a four-arm average denominator.
 
@@ -224,7 +225,7 @@ R[g] = exp(L[g])
 panel_percentage_change[g] = 100 * (R[g] - 1)
 ```
 
-There are no run-by-run differences or ratios, and no logarithms of individual observations. Independently permuting either arm's sample order leaves every statistic unchanged. For medians, retain the raw per-case difference and also calculate `median_ratio[c,g] = median(X[c,W,:]) / median(X[c,g,:])`. Aggregate positive median ratios with the same frozen-weight geometric rule as the mean ratios, and report a pointwise 95% CI for the resulting panel median change. This is a summary of within-case medians, not the median of pooled circuit outcomes.
+There are no run-by-run differences or ratios, and no logarithms of individual observations. Independently permuting either arm's sample order leaves every statistic unchanged. For medians, retain the raw per-case difference and also calculate `median_ratio[c,g] = Q_0.50(X[c,W,:]) / Q_0.50(X[c,g,:])` using the rank rule in section 5.1. Aggregate positive median ratios with the same frozen-weight geometric rule as the mean ratios, and report a pointwise 95% CI for the resulting panel median change. This is a summary of within-case medians, not the median of pooled circuit outcomes.
 
 The scored-case weights sum to one. Label `R` the **weighted geometric mean of per-case arithmetic-mean ratios**. The geometric step is only an aggregation across cases: it gives each case its frozen weight on a relative scale, so circuits with large raw depths or counts do not dominate just because they are large. It is not a ratio of pooled raw means, a geometric mean across runs, or the percentage reduction in the total gate count of the workload.
 
@@ -278,11 +279,11 @@ W (wait_time):  1200 1210 1225 1240 1250 1260 1275 1290 1310 1320
 g (comparator): 1330 1250 1360 1240 1400 1300 1230 1420 1350 1290
 ```
 
-With ten values the type-7 index is `1 + 9 * 0.9 = 9.1`, so `P90 = 0.9 * x_(9) + 0.1 * x_(10)` after sorting each arm:
+With ten values, the P90 rank is `ceil(10 * 0.90) = 9`. Take the ninth value after sorting each arm:
 
 ```text
-P90(W) = 0.9 * 1310 + 0.1 * 1320 = 1311       P90(g) = 0.9 * 1400 + 0.1 * 1420 = 1402
-normalized_p90 = 1311 / 1402 = 0.935          (-6.5%: the wait-time upper tail is lower)
+P90(W) = 1310                                P90(g) = 1400
+normalized_p90 = 1310 / 1400 = 0.9357        (-6.4%: the wait-time upper tail is lower)
 ```
 
 The normalized percentile compares the two arms' upper tails. Sample positions in the two lists have no correspondence. The bootstrap independently resamples each arm and recomputes both quantiles before dividing them.
@@ -430,7 +431,7 @@ For ordinary pointwise intervals, use 10,000 recorded percentile-bootstrap resam
 2. In each replicate, draw 100 records with replacement independently within each case and arm. Keep D2/N2 together within a selected record. The same index draw must not be imposed on different arms or cases.
 3. Resample wait time once per case per replicate and reuse that resample in all three contrasts. This preserves their shared wait-time uncertainty without pairing wait-time runs to comparator runs.
 4. Recompute each arm's arithmetic mean, median, SD, IQR, and P90. Compare the summaries, then recompute panel/subpanel effects using the original frozen case weights. Recompute each arm's own mean for normalized SD and own median for normalized IQR. Store one panel statistic per comparison, metric, and summary type in each replicate. Cases themselves are not resampled.
-5. Take the 2.5th and 97.5th percentiles of each bootstrap statistic for a pointwise 95% interval. For panel log mean/median/P90 ratios, transform endpoints with `exp()` or `100*(exp(value)-1)`. Use the corresponding adjusted probabilities for primary simultaneous intervals.
+5. Take the 2.5th and 97.5th percentiles of each bootstrap statistic using the nearest-rank rule for a pointwise 95% interval. For panel log mean/median/P90 ratios, transform endpoints with `exp()` or `100*(exp(value)-1)`. Use the corresponding adjusted probabilities for primary simultaneous intervals.
 6. Record undefined or degenerate results. Validate against independent skewed, discrete, and constant samples; changing an arm's observation order must not change the estimator. Do not silently switch methods or discard invalid replicates.
 
 ![Independent resampling within each arm, followed by distribution summaries and three contrasts sharing the wait-time resample](figures/fig6_seed_vectors_bootstrap.svg)
@@ -450,7 +451,7 @@ panel_draws = {name: np.empty((B, 3, M)) for name in names}
 def panel_statistics(data):
     means = data.mean(axis=2)               # (cases, arms, metrics)
     q25, medians, q75, q90 = np.quantile(
-        data, [0.25, 0.50, 0.75, 0.90], axis=2, method="linear"
+        data, [0.25, 0.50, 0.75, 0.90], axis=2, method="inverted_cdf"
     )
     sd = data.std(axis=2, ddof=1)
     iqr = q75 - q25
@@ -479,11 +480,12 @@ for b in range(B):                          # 10_000 pointwise; >=100_000 adjust
         panel_draws[name][b] = replicate[name]
 
 ci95 = {
-    name: np.quantile(draws, [0.025, 0.975], axis=0)
+    name: np.quantile(draws, [0.025, 0.975], axis=0, method="inverted_cdf")
     for name, draws in panel_draws.items()
 }
 mean_ci_adjusted = np.quantile(
-    panel_draws["mean"], [0.05 / (2 * 6), 1 - 0.05 / (2 * 6)], axis=0
+    panel_draws["mean"], [0.05 / (2 * 6), 1 - 0.05 / (2 * 6)],
+    axis=0, method="inverted_cdf"
 )
 # Also retain per-case summaries and their confidence intervals.
 
@@ -505,7 +507,7 @@ For 100 independent observations from a continuous distribution, a conservative 
 Raw P90: [x_(84), x_(96)]
 ```
 
-Ranks are one-based. These ranks allocate at most 2.5% to each tail of `Binomial(100, 0.90)` and give approximately 95.6% coverage. Define the population quantile as `Q_p = inf{x : F(x) >= p}`, keep ties without jitter, and use actual ranked observations for the bounds. These bounds are also conservative for discrete/tied outcomes. Type-7 interpolation defines the point estimate, not the confidence-bound ranks. [NIST TN 2119, section 5.3](https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf).
+Ranks are one-based. These ranks allocate at most 2.5% to each tail of `Binomial(100, 0.90)` and give approximately 95.6% coverage. Define the population quantile as `Q_p = inf{x : F(x) >= p}`, keep ties without jitter, and use actual ranked observations for the bounds. These bounds are also conservative for discrete/tied outcomes. The P90 point estimate is `x_(90)`. [NIST TN 2119, section 5.3](https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf).
 
 **Worked derivation of the ranks (continuous case).** Let `B ~ Binomial(100, 0.90)` count observations at or below the population P90. The interval `[x_(l), x_(u)]` covers P90 with probability `P(l <= B <= u - 1)`. The tightest choice with each tail at most 2.5% is:
 

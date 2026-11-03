@@ -182,8 +182,8 @@ def fig2_matched_routing():
 
 
 def fig3_order_statistics():
-    f = Fig(960, 280, "Sorted observations by rank: the type-7 P90 estimate interpolates between "
-                      "ranks 90 and 91, and the conservative P90 interval is [x_(84), x_(96)].")
+    f = Fig(960, 280, "Sorted observations by rank: the nearest-rank P90 estimate is x_(90), "
+                      "and the conservative P90 interval is [x_(84), x_(96)].")
     ax_y = 190
     f.text(40, 30, "100 sorted D2 observations of one case and arm; tick labels are the ranks r of x_(r), "
                    "ranks 81..100 expanded", size=12, fill=INK)
@@ -200,7 +200,7 @@ def fig3_order_statistics():
     ex0, step = 215, 32
     rank_x = lambda r: ex0 + (r - 81) * step
     f.line(ex0 - 10, ax_y, rank_x(100) + 50, ax_y, stroke=INK2, sw=1.4, arrow="ink")
-    big = (84, 90, 91, 96, 100)
+    big = (84, 90, 96, 100)
     for r in range(81, 101):
         x = rank_x(r)
         f.line(x, ax_y - (8 if r in big else 4), x, ax_y + (8 if r in big else 4),
@@ -209,10 +209,10 @@ def fig3_order_statistics():
             f.text(x, ax_y + 22, str(r), size=10.5, anchor="middle", mono=True, fill=INK)
     f.text(rank_x(100) + 56, ax_y + 4, "rank", size=11, fill=INK2)
     # P90 estimate
-    p90x = rank_x(90) + 0.1 * step
+    p90x = rank_x(90)
     f.line(p90x, ax_y - 52, p90x, ax_y - 10, stroke=BLUE, sw=1.8, arrow="blue")
     f.rect(p90x - 4, ax_y - 4, 8, 8, fill=BLUE, stroke=BLUE, rx=4)
-    f.lines(p90x, ax_y - 72, ["P90 = 0.9 x_(90) + 0.1 x_(91)", "type-7 index 1 + 99 x 0.90 = 90.1"],
+    f.lines(p90x, ax_y - 72, ["P90 = x_(90)", "nearest rank: ceil(100 x 0.90) = 90"],
             size=11, lh=14, anchor="middle", fill=BLUE)
     # P90 rank interval
     by = ax_y + 52
