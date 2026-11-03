@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate the explanatory SVG figures referenced by ../benchmark_update.md.
 
-Run from anywhere:  python3 design/figures/make_figures.py
+Run from the repository root:  python3 compare_distributions/figures/make_figures.py
 Each figure is a self-contained SVG with an opaque light surface, so it renders
 identically inside <img> tags in light and dark viewers (GitHub, PyCharm).
-Figure numbers follow their order of appearance in the design document.
+Filenames are stable asset identifiers; captions in the design document set figure numbers.
 """
 from pathlib import Path
 
@@ -147,43 +147,9 @@ def fig1_arms_and_contrasts():
 
 
 # --------------------------------------------------------------------------------------
-def fig2_matched_routing():
-    f = Fig(960, 650, "Controlled routing: one fixed prepared input and applied layout per case, "
-                      "100 independent routing seeds per arm, and identical downstream passes.")
-    f.text(480, 30, "One fixed case; four independently sampled routing distributions", size=16,
-           anchor="middle", weight="bold")
-    f.box(180, 52, 600, 52, ["Freeze circuit, target, optimization level, and preparation policy",
-                            "Preparation must leave routing work for the selected preset"], size=13)
-    f.line(480, 104, 480, 126, arrow="ink")
-    f.box(180, 128, 600, 64, ["SabreLayout(skip_routing=True, seed=LAYOUT_SEED)",
-                             "Fixed layout trials, swap trials, and max_iterations",
-                             "FullAncillaAllocation → EnlargeWithAncilla → ApplyLayout"], size=12)
-    f.line(480, 192, 480, 216)
-    f.line(135, 216, 825, 216)
-    for x, arm in zip((30, 260, 490, 720), ("wait_time", "decay", "lookahead", "basic")):
-        accent = BLUE if arm == "wait_time" else INK2
-        f.line(x + 105, 216, x + 105, 246, arrow="ink")
-        f.box(x, 248, 210, 96, [arm, "100 own routing seeds", "SabreSwap; fixed trials=T",
-                               "Fresh copy of fixed input"], size=12, lh=19,
-              stroke=accent, fill=BLUE_TINT if arm == "wait_time" else BG)
-        f.line(x + 105, 344, x + 105, 374)
-    f.line(135, 374, 825, 374)
-    f.line(480, 374, 480, 396, arrow="ink")
-    f.box(180, 398, 600, 50, ["Identical downstream translation and optimization",
-                             "Measure native D2/N2 and retain routing diagnostics"], size=13)
-    f.line(480, 448, 480, 470, arrow="ink")
-    f.box(180, 472, 600, 54, ["100 observations per arm; summarize each distribution separately",
-                             "Shared conditions, independent samples; no seed matching"], size=13)
-    f.box(80, 554, 800, 66, ["Activation check: inspect the actual pass trace",
-                            "Default SabreLayout may route internally, causing CheckMap to skip routing.",
-                            "Replacing only pm.routing can leave the selected preset with no work."],
-          size=12, lh=18, stroke=RED, color=RED)
-    f.save("fig2_matched_routing.svg")
-
-
 def fig3_order_statistics():
-    f = Fig(960, 280, "Sorted observations by rank: the nearest-rank P90 estimate is x_(90), "
-                      "and the conservative P90 interval is [x_(84), x_(96)].")
+    f = Fig(960, 235, "Sorted observations by rank: the nearest-rank P90 estimate is the "
+                      "90th observed value x_(90) among 100 sorted results.")
     ax_y = 190
     f.text(40, 30, "100 sorted D2 observations of one case and arm; tick labels are the ranks r of x_(r), "
                    "ranks 81..100 expanded", size=12, fill=INK)
@@ -200,7 +166,7 @@ def fig3_order_statistics():
     ex0, step = 215, 32
     rank_x = lambda r: ex0 + (r - 81) * step
     f.line(ex0 - 10, ax_y, rank_x(100) + 50, ax_y, stroke=INK2, sw=1.4, arrow="ink")
-    big = (84, 90, 96, 100)
+    big = (85, 90, 95, 100)
     for r in range(81, 101):
         x = rank_x(r)
         f.line(x, ax_y - (8 if r in big else 4), x, ax_y + (8 if r in big else 4),
@@ -214,13 +180,6 @@ def fig3_order_statistics():
     f.rect(p90x - 4, ax_y - 4, 8, 8, fill=BLUE, stroke=BLUE, rx=4)
     f.lines(p90x, ax_y - 72, ["P90 = x_(90)", "nearest rank: ceil(100 x 0.90) = 90"],
             size=11, lh=14, anchor="middle", fill=BLUE)
-    # P90 rank interval
-    by = ax_y + 52
-    f.path(f"M{rank_x(84)},{by - 8} L{rank_x(84)},{by} L{rank_x(96)},{by} L{rank_x(96)},{by - 8}",
-           stroke=INK, sw=1.6)
-    f.text((rank_x(84) + rank_x(96)) / 2, by + 16,
-           "conservative P90 interval [x_(84), x_(96)]: coverage 95.6% from Binomial(100, 0.90)", size=11,
-           anchor="middle", fill=INK)
     f.save("fig3_order_statistics.svg")
 
 
@@ -236,11 +195,11 @@ def fig4_three_estimators():
           size=13, stroke=ORANGE)
     lanes = [
         (155, "(a) Primary mean comparison", "mean(W), mean(g)", "mean(W) / mean(g)",
-         ["Weighted geometric mean", "of case mean ratios"]),
+         ["Weighted geometric mean", "Case mean ratios + analytic CI"]),
         (275, "(b) Upper-tail comparison", "P90(W), P90(g)", "P90(W) / P90(g)",
          ["Weighted geometric mean", "of case P90 ratios"]),
         (395, "(c) Relative-spread comparison", "CV(W), CV(g)", "100 * (CV(W) - CV(g))",
-         ["Weighted mean across cases", "One CV difference + CI (pp)"]),
+         ["Weighted mean across cases", "One CV difference (pp)"]),
     ]
     for y, title, summaries, contrast, aggregate in lanes:
         f.text(50, y - 12, title, size=13, weight="bold")
@@ -250,13 +209,13 @@ def fig4_three_estimators():
         f.line(592, y + 27, 632, y + 27, arrow="ink")
         f.box(634, y, 276, 55, aggregate, size=12)
     f.lines(50, 494, ["CV = SD / own mean. IQR uses IQR / own median; median uses case ratios.",
-                      "Each aggregate has a confidence interval. No per-run comparisons or rank matching."],
+                      "Only mean comparisons have confidence intervals. No per-run comparisons or rank matching."],
             size=12, lh=19, fill=INK2)
     f.save("fig4_three_estimators.svg")
 
 
 def fig5_interval_reading():
-    f = Fig(960, 330, "Reading a comparison interval against the no-change reference: entirely below favors "
+    f = Fig(960, 330, "Reading a mean-ratio confidence interval against the no-change reference: entirely below favors "
                       "wait time, crossing is unresolved, entirely above is a regression; an adjusted "
                       "interval is wider than the pointwise one for the same estimate.")
     ax0, ax1, y0 = 300, 600, 60
@@ -291,99 +250,56 @@ def fig5_interval_reading():
         f.line(px(b), y - 5, px(b), y + 5, stroke=INK, sw=2)
         f.rect(px(est) - 4.5, y - 4.5, 9, 9, fill=BLUE, stroke=BG, sw=1.5, rx=4.5)
         f.text(ax1 + 16, y + 4, note, size=10.5, fill=INK2)
-    f.text(30, 30, "Illustrative intervals only; no measured results.", size=11, fill=INK2, italic=True)
+    f.text(30, 30, "Illustrative mean-ratio intervals only; no measured results.", size=11, fill=INK2, italic=True)
     f.save("fig5_interval_reading.svg")
 
 
 # --------------------------------------------------------------------------------------
-def fig6_seed_vectors_bootstrap():
-    f = Fig(960, 570, "Independent-arm bootstrap: independently resample 100 records within every "
-                      "case and arm, keep D2/N2 together, then compare summaries and reuse the "
-                      "wait-time resample for all three contrasts.")
-    f.text(480, 30, "One bootstrap replicate, within one fixed case", size=16,
+def fig6_mean_confidence():
+    f = Fig(960, 620, "Analytic confidence intervals for the mean ratio: use each independent arm's "
+                      "sample mean and variance, propagate uncertainty on the log scale, combine "
+                      "case variances with squared fixed weights, and exponentiate the interval.")
+    f.text(480, 30, "Analytic uncertainty for one mean comparison", size=16,
            anchor="middle", weight="bold")
-    arms = ("wait_time", "decay", "lookahead", "basic")
-    example_indices = ("17, 3, 3, 88, …", "8, 21, 9, 9, …", "34, 2, 55, 1, …", "12, 7, 7, 62, …")
-    for x, arm, indices in zip((30, 260, 490, 720), arms, example_indices):
-        acc = BLUE if arm == "wait_time" else INK2
-        f.box(x, 62, 210, 50, [arm, "100 original records"], size=13, stroke=acc,
-              fill=BLUE_TINT if arm == "wait_time" else BG)
-        f.line(x + 105, 112, x + 105, 140, arrow="ink")
-        f.box(x, 142, 210, 76, ["Own independent index draw", indices,
-                               "100 records with replacement"], size=11, lh=18, stroke=acc)
-        f.line(x + 105, 218, x + 105, 246, arrow="ink")
-        f.box(x, 248, 210, 64, ["Recompute mean, median,", "SD, IQR, and P90"], size=12,
-              stroke=acc, fill=BLUE_TINT if arm == "wait_time" else BG)
-    f.text(480, 342, "Use the same resampled wait-time summaries in all three contrasts", size=13,
-           anchor="middle", fill=BLUE, weight="bold")
-    for x, comparator in zip((45, 355, 665), ("decay", "lookahead", "basic")):
-        f.box(x, 362, 250, 58, [f"wait_time vs {comparator}",
-                               "Mean/P90 ratios; spread changes"], size=12)
-    f.box(160, 450, 640, 52, ["Repeat independently for every case; keep case weights fixed",
-                             "Recompute panel statistics; take bootstrap interval endpoints"], size=12)
-    f.lines(40, 532, ["Keep D2 and N2 from each selected record together. Never match records across arms.",
-                      "The three contrasts share wait-time uncertainty; arms have independent sampling."],
-            size=12, lh=19, fill=INK2)
-    f.save("fig6_seed_vectors_bootstrap.svg")
-
-
-def fig7_runtime_blocks():
-    f = Fig(960, 355, "Runtime measurement: the current protocol times all seeds of one build and then the "
-                      "other; the proposed protocol times balanced blocks that each contain all four arms "
-                      "with arm-specific seeds, warm-up outside the timed region, and an A/A control.")
-    f.text(30, 34, "Current quality timing, one case:", size=12, fill=INK, weight="bold")
-    y = 50
-    f.rect(30, y, 420, 30, fill=BG, stroke=INK2)
-    f.text(240, y + 19, "build A: seeds 0, 1, 2, ..., 99 (all timed back to back)", size=11, anchor="middle")
-    f.rect(470, y, 420, 30, fill=BG, stroke=INK2)
-    f.text(680, y + 19, "build B: seeds 0, 1, 2, ..., 99", size=11, anchor="middle")
-    f.line(30, y + 42, 890, y + 42, stroke=INK2, sw=1, arrow="ink")
-    f.text(30, y + 58, "time; the order of A and B alternates only between cases, so drift and thermal state "
-                       "line up with the build", size=10.5, fill=INK2)
-    f.text(30, 150, "Proposed: balanced time blocks, one independent seed per arm in each block:", size=12,
-           fill=INK, weight="bold")
-    y, x = 168, 30
-    f.rect(x, y, 70, 30, fill=BG, stroke=LINE, dash="4 3")
-    f.text(x + 35, y + 19, "warm-up", size=10.5, anchor="middle", fill=INK2)
-    f.text(x + 35, y + 44, "untimed", size=10, anchor="middle", fill=INK2)
-    x += 84
-    blocks = [("block 1", ["W", "D", "L", "B"]), ("block 2", ["D", "L", "B", "W"]),
-              ("block 3", ["L", "B", "W", "D"]), ("block 4", ["B", "W", "D", "L"])]
-    cellw = 30
-    for name, order in blocks:
-        f.rect(x - 3, y - 4, cellw * 4 + 6, 38, fill=BG, stroke=INK2, sw=1.2)
-        for i, a in enumerate(order):
-            acc = a == "W"
-            f.rect(x + i * cellw + 1, y + 1, cellw - 2, 28, fill=BLUE if acc else BG,
-                   stroke=BLUE if acc else LINE, sw=1, rx=2)
-            f.text(x + i * cellw + cellw / 2, y + 19, a, size=12, anchor="middle", mono=True,
-                   fill="#ffffff" if acc else INK)
-        f.text(x + cellw * 2, y + 48, name, size=10.5, anchor="middle", fill=INK2)
-        x += cellw * 4 + 20
-    f.text(x + 6, y + 19, "...", size=14, fill=INK2)
-    x += 34
-    f.rect(x - 3, y - 4, cellw * 4 + 6, 38, fill=BG, stroke=INK2, sw=1.2)
-    for i in range(4):
-        f.rect(x + i * cellw + 1, y + 1, cellw - 2, 28, fill=BG, stroke=LINE, sw=1, rx=2)
-        f.text(x + i * cellw + cellw / 2, y + 19, "D", size=12, anchor="middle", mono=True, fill=INK)
-    f.text(x + cellw * 2, y + 48, "A/A control", size=10.5, anchor="middle", fill=INK2)
-    x += cellw * 4 + 20
-    f.text(x + 6, y + 19, "...", size=14, fill=INK2)
-    f.line(30, y + 70, 890, y + 70, stroke=INK2, sw=1, arrow="ink")
-    f.lines(30, y + 88, [
-        "time; each arm sits once in every block position within each group of four blocks, and the order "
-        "within that constraint is randomized.",
-        "Repeat in independent sessions; each arm has its own 100-seed list. Compare arm means, not block ratios.",
-        "Resample complete sessions across the fixed panel (section 7); runtime CIs condition on the frozen seed lists."], size=10.5, lh=15, fill=INK2)
-    f.text(30, 333, "W = wait_time, D = decay, L = lookahead, B = basic", size=10.5, fill=INK2)
-    f.save("fig7_runtime_blocks.svg")
+    f.text(480, 52, "Apply separately to D2 and N2, and to each of the three comparators", size=12,
+           anchor="middle", fill=INK2)
+    for x, arm, suffix, accent, fill in (
+        (60, "wait_time", "W", BLUE, BLUE_TINT),
+        (520, "comparator: decay, lookahead, or basic", "g", ORANGE, BG),
+    ):
+        f.box(x, 76, 380, 94,
+              [arm, "n = 100; sample mean m; sample SD s",
+               f"v_{suffix} = s_{suffix}^2 / (100 * m_{suffix}^2)"],
+              size=12, lh=23, stroke=accent, fill=fill)
+        f.line(x + 190, 170, x + 190, 190)
+    f.line(250, 190, 710, 190)
+    f.line(480, 190, 480, 214, arrow="ink")
+    f.box(100, 216, 760, 76,
+          ["Within each case: independent arm estimates",
+           "ell_c = log(m_W / m_g)",
+           "SE_case = sqrt(v_W + v_g)"], size=13, lh=20)
+    f.line(480, 292, 480, 318, arrow="ink")
+    f.box(100, 320, 760, 86,
+          ["Across the fixed panel: use the frozen case weights w_c",
+           "L = sum_c w_c * ell_c",
+           "SE_panel = sqrt(sum_c w_c^2 * (v_W,c + v_g,c))"], size=13, lh=22)
+    f.line(480, 406, 480, 432, arrow="ink")
+    f.box(100, 434, 760, 82,
+          ["Mean-ratio estimate R = exp(L)",
+           "Ratio CI = [exp(L - z * SE_panel), exp(L + z * SE_panel)]",
+           "Convert each endpoint to percentage change with 100 * (ratio - 1)"],
+          size=12.5, lh=22, stroke=BLUE, fill=BLUE_TINT)
+    f.lines(480, 546,
+            ["Pointwise 95%: z = 1.960     |     Six-effect adjustment: z = 2.638",
+             "Approximate intervals; require positive means and independent case/arm samples.",
+             "The three contrasts share the same wait-time estimates and uncertainty."],
+            size=12, lh=23, anchor="middle", fill=INK2)
+    f.save("fig6_mean_confidence.svg")
 
 
 if __name__ == "__main__":
     fig1_arms_and_contrasts()
-    fig2_matched_routing()
     fig3_order_statistics()
     fig4_three_estimators()
     fig5_interval_reading()
-    fig6_seed_vectors_bootstrap()
-    fig7_runtime_blocks()
+    fig6_mean_confidence()

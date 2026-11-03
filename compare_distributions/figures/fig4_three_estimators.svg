@@ -15,7 +15,7 @@
 <text x="467.0" y="179.32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="467.0" dy="0">One contrast per case</tspan><tspan x="467.0" dy="15">mean(W) / mean(g)</tspan></text>
 <line x1="592" y1="182" x2="632" y2="182" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow-ink)"/>
 <rect x="634" y="155" width="276" height="55" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
-<text x="772.0" y="179.32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="772.0" dy="0">Weighted geometric mean</tspan><tspan x="772.0" dy="15">of case mean ratios</tspan></text>
+<text x="772.0" y="179.32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="772.0" dy="0">Weighted geometric mean</tspan><tspan x="772.0" dy="15">Case mean ratios + analytic CI</tspan></text>
 <text x="50" y="263" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13" text-anchor="start" fill="#0b0b0b" font-weight="bold">(b) Upper-tail comparison</text>
 <rect x="50" y="275" width="250" height="55" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
 <text x="175.0" y="299.32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="175.0" dy="0">Separate arm summaries</tspan><tspan x="175.0" dy="15">P90(W), P90(g)</tspan></text>
@@ -33,6 +33,6 @@
 <text x="467.0" y="419.32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="467.0" dy="0">One contrast per case</tspan><tspan x="467.0" dy="15">100 * (CV(W) - CV(g))</tspan></text>
 <line x1="592" y1="422" x2="632" y2="422" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow-ink)"/>
 <rect x="634" y="395" width="276" height="55" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
-<text x="772.0" y="419.32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="772.0" dy="0">Weighted mean across cases</tspan><tspan x="772.0" dy="15">One CV difference + CI (pp)</tspan></text>
-<text x="50" y="494" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#52514e"><tspan x="50" dy="0">CV = SD / own mean. IQR uses IQR / own median; median uses case ratios.</tspan><tspan x="50" dy="19">Each aggregate has a confidence interval. No per-run comparisons or rank matching.</tspan></text>
+<text x="772.0" y="419.32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="772.0" dy="0">Weighted mean across cases</tspan><tspan x="772.0" dy="15">One CV difference (pp)</tspan></text>
+<text x="50" y="494" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="start" fill="#52514e"><tspan x="50" dy="0">CV = SD / own mean. IQR uses IQR / own median; median uses case ratios.</tspan><tspan x="50" dy="19">Only mean comparisons have confidence intervals. No per-run comparisons or rank matching.</tspan></text>
 </svg>
