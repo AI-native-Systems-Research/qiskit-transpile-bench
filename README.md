@@ -64,6 +64,11 @@ Start a new session after changing the harness or profile; existing sessions pin
 and data. Existing results remain on disk and can be read with their archived harness.
 See the [documentation index](docs/README.md) and [manual workflow](docs/workflow/README.md).
 
+For the four-preset `wait_time` distribution study, use the separate
+[two-stage comparison workflow](compare_distributions/README.md): `prepare` freezes and
+collects the raw data; `report` generates statistics, graphs, and the final report.
+Its default output is `./compare_distributions_results`, and it does not issue a two-build verdict.
+
 ## Development
 
 ```bash

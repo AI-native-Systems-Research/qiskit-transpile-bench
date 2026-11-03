@@ -19,6 +19,7 @@ qiskit-transpile-bench = "qtb.cli:main"
 
 [project.optional-dependencies]
 verifier = ["qiskit==2.5.2", "numpy==2.3.3", "sympy==1.14.0"]
+comparison = ["numpy>=1.26", "scipy>=1.11", "matplotlib>=3.8"]
 
 [dependency-groups]
 dev = [
