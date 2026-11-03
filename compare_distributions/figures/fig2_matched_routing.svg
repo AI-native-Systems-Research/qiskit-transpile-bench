@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 650" width="960" height="650" role="img" aria-label="Controlled routing: one fixed prepared input and applied layout per case, 100 independent routing seeds per arm, and identical downstream passes.">
+<title>Controlled routing: one fixed prepared input and applied layout per case, 100 independent routing seeds per arm, and identical downstream passes.</title>
+<defs><marker id="arrow-ink" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L9,4.5 L0,9 z" fill="#52514e"/></marker><marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L9,4.5 L0,9 z" fill="#2a78d6"/></marker><marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L9,4.5 L0,9 z" fill="#eb6834"/></marker><marker id="arrow-red" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L9,4.5 L0,9 z" fill="#e34948"/></marker></defs>
+<rect x="0" y="0" width="960" height="650" fill="#fcfcfb"/>
+<text x="480" y="30" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="16" text-anchor="middle" fill="#0b0b0b" font-weight="bold">One fixed case; four independently sampled routing distributions</text>
+<rect x="180" y="52" width="600" height="52" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
+<text x="480.0" y="75.18" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#0b0b0b"><tspan x="480.0" dy="0">Freeze circuit, target, optimization level, and preparation policy</tspan><tspan x="480.0" dy="15">Preparation must leave routing work for the selected preset</tspan></text>
+<line x1="480" y1="104" x2="480" y2="126" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow-ink)"/>
+<rect x="180" y="128" width="600" height="64" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
+<text x="480.0" y="149.32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="480.0" dy="0">SabreLayout(skip_routing=True, seed=LAYOUT_SEED)</tspan><tspan x="480.0" dy="15">Fixed layout trials, swap trials, and max_iterations</tspan><tspan x="480.0" dy="15">FullAncillaAllocation → EnlargeWithAncilla → ApplyLayout</tspan></text>
+<line x1="480" y1="192" x2="480" y2="216" stroke="#52514e" stroke-width="1.2"/>
+<line x1="135" y1="216" x2="825" y2="216" stroke="#52514e" stroke-width="1.2"/>
+<line x1="135" y1="216" x2="135" y2="246" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow-ink)"/>
+<rect x="30" y="248" width="210" height="96" rx="4" fill="#cde2fb" stroke="#2a78d6" stroke-width="1.2"/>
+<text x="135.0" y="271.82" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="135.0" dy="0">wait_time</tspan><tspan x="135.0" dy="19">100 own routing seeds</tspan><tspan x="135.0" dy="19">SabreSwap; fixed trials=T</tspan><tspan x="135.0" dy="19">Fresh copy of fixed input</tspan></text>
+<line x1="135" y1="344" x2="135" y2="374" stroke="#52514e" stroke-width="1.2"/>
+<line x1="365" y1="216" x2="365" y2="246" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow-ink)"/>
+<rect x="260" y="248" width="210" height="96" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
+<text x="365.0" y="271.82" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="365.0" dy="0">decay</tspan><tspan x="365.0" dy="19">100 own routing seeds</tspan><tspan x="365.0" dy="19">SabreSwap; fixed trials=T</tspan><tspan x="365.0" dy="19">Fresh copy of fixed input</tspan></text>
+<line x1="365" y1="344" x2="365" y2="374" stroke="#52514e" stroke-width="1.2"/>
+<line x1="595" y1="216" x2="595" y2="246" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow-ink)"/>
+<rect x="490" y="248" width="210" height="96" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
+<text x="595.0" y="271.82" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="595.0" dy="0">lookahead</tspan><tspan x="595.0" dy="19">100 own routing seeds</tspan><tspan x="595.0" dy="19">SabreSwap; fixed trials=T</tspan><tspan x="595.0" dy="19">Fresh copy of fixed input</tspan></text>
+<line x1="595" y1="344" x2="595" y2="374" stroke="#52514e" stroke-width="1.2"/>
+<line x1="825" y1="216" x2="825" y2="246" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow-ink)"/>
+<rect x="720" y="248" width="210" height="96" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
+<text x="825.0" y="271.82" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#0b0b0b"><tspan x="825.0" dy="0">basic</tspan><tspan x="825.0" dy="19">100 own routing seeds</tspan><tspan x="825.0" dy="19">SabreSwap; fixed trials=T</tspan><tspan x="825.0" dy="19">Fresh copy of fixed input</tspan></text>
+<line x1="825" y1="344" x2="825" y2="374" stroke="#52514e" stroke-width="1.2"/>
+<line x1="135" y1="374" x2="825" y2="374" stroke="#52514e" stroke-width="1.2"/>
+<line x1="480" y1="374" x2="480" y2="396" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow-ink)"/>
+<rect x="180" y="398" width="600" height="50" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
+<text x="480.0" y="420.18" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#0b0b0b"><tspan x="480.0" dy="0">Identical downstream translation and optimization</tspan><tspan x="480.0" dy="15">Measure native D2/N2 and retain routing diagnostics</tspan></text>
+<line x1="480" y1="448" x2="480" y2="470" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow-ink)"/>
+<rect x="180" y="472" width="600" height="54" rx="4" fill="#fcfcfb" stroke="#52514e" stroke-width="1.2"/>
+<text x="480.0" y="496.18" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#0b0b0b"><tspan x="480.0" dy="0">100 observations per arm; summarize each distribution separately</tspan><tspan x="480.0" dy="15">Shared conditions, independent samples; no seed matching</tspan></text>
+<rect x="80" y="554" width="800" height="66" rx="4" fill="#fcfcfb" stroke="#e34948" stroke-width="1.2"/>
+<text x="480.0" y="573.32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle" fill="#e34948"><tspan x="480.0" dy="0">Activation check: inspect the actual pass trace</tspan><tspan x="480.0" dy="18">Default SabreLayout may route internally, causing CheckMap to skip routing.</tspan><tspan x="480.0" dy="18">Replacing only pm.routing can leave the selected preset with no work.</tspan></text>
+</svg>
