@@ -373,7 +373,7 @@ The CI for the aggregate mean comparison uses the analytic variance of the weigh
 
 ### 6.1 What a confidence interval means here
 
-Each arm produces outcomes over 100 independent seeds. A different seed sample could change the estimated mean and its comparison with another arm. A **confidence interval (CI)** describes this seed-sampling uncertainty. Calculate CIs only for raw arithmetic means and arithmetic-mean comparisons. Median, SD, IQR, and P90 remain descriptive estimates.
+Each arm produces outcomes over 100 independent seeds. A different seed sample could change the estimated mean and its comparison with another arm. A **confidence interval (CI)** describes this seed-sampling uncertainty. Calculate CIs only for raw arithmetic means and arithmetic-mean ratios. Raw mean differences, medians, SDs, IQRs, and P90s remain descriptive estimates.
 
 A 95% confidence procedure is designed so that, over repeated samples and recalculated intervals, about 95% of the intervals contain the underlying quantity. It is not a 95% probability that a fixed observed interval contains that quantity. The analytic intervals below have approximate coverage for these benchmark outcomes. [NIST interpretation](https://www.itl.nist.gov/div898/handbook/prc/section1/prc14.htm).
 
@@ -415,7 +415,7 @@ t_(99, 0.975) = approximately 1.9842
 
 The Student-t interval is exact for independent normal observations and approximate otherwise. [NIST mean confidence limits](https://www.itl.nist.gov/div898/handbook/eda/section3/eda352.htm).
 
-For a mean ratio, apply the delta method to the logarithm of the two arithmetic means. Under independent arm sampling, its estimated variance is the sum of the two relative mean variances:
+For a mean ratio, apply the delta method to the logarithm of the two arithmetic means. Under independent arm sampling, its estimated variance is the sum of the two means' squared relative standard errors:
 
 ```text
 a[c,h] = s2[c,h] / (100 * m[c,h]^2)
@@ -424,7 +424,7 @@ v[c,g] = a[c,W] + a[c,g]
 case_ratio_CI95[c,g] = exp(ell[c,g] +/- 1.959964 * sqrt(v[c,g]))
 ```
 
-This follows by applying the derivative `1/m` to each mean's variance `s2/n`. It estimates the uncertainty of a ratio of arithmetic means; no logarithms of individual runs enter the calculation. [Delta-method derivation](https://www.stata.com/support/faqs/statistics/delta-method/).
+This is the delta method: the variance of `log(m)` is approximately the squared derivative `(1/m)^2` times the variance `s2/n` of `m`, and the two arms' terms add because the arms are sampled independently. The interval uses the standard-normal critical value because the delta method is a large-sample approximation; the raw-mean interval above uses Student-t. It estimates the uncertainty of a ratio of arithmetic means; no logarithms of individual runs enter the calculation. [Delta-method derivation](https://www.stata.com/support/faqs/statistics/delta-method/).
 
 For the fixed panel, retain the original weights and combine independent case variances with their squared weights:
 
@@ -437,7 +437,7 @@ ratio_CI[g] = [exp(L[g] - z*SE[g]), exp(L[g] + z*SE[g])]
 change_CI[g] = 100 * (ratio_CI[g] - 1)
 ```
 
-Use `z = 1.959964` for pointwise 95% intervals and `z = 2.638257` for the six-endpoint adjustment in section 6.4. For a declared subpanel, renormalize its frozen weights first, then use the same formulas. Each comparison reuses the same wait-time mean and variance. The three comparisons are dependent through those shared observations; Bonferroni does not require independence between comparisons.
+Use `z = 1.959964` for pointwise 95% intervals and `z = 2.638257` for the six-endpoint adjustment in section 6.4. The interval is symmetric on the log scale, so its ratio and percentage-change limits are not symmetric around the point estimate; report the limits as computed, without re-centering. For a declared subpanel, renormalize its frozen weights first, then use the same formulas. Each comparison reuses the same wait-time mean and variance. The three comparisons are dependent through those shared observations; Bonferroni does not require independence between comparisons.
 
 ![Analytic mean uncertainty from arm means and variances to case log ratios and the fixed-weight panel interval](figures/fig6_mean_confidence.svg)
 
@@ -481,13 +481,13 @@ panel_change_ci95 = 100 * (panel_ratio_ci95 - 1)
 panel_change_ci_adjusted = 100 * (panel_ratio_ci_adjusted - 1)
 ```
 
-**Validity.** The formulas require independent seed samples within and across cases/arms, finite variances, and sufficiently stable sample means. Log-ratio intervals require positive means in both arms. Strong skew, influential observations, or means poorly separated from zero can make the approximation unreliable; 100 seeds alone does not guarantee accuracy. Record relative standard errors `sqrt(s2/n)/m` and mark the affected inference `approximation_unresolved` when diagnostics do not support the approximation. Retain the point estimates and raw data.
+**Validity.** The formulas require independent seed samples within and across cases/arms, finite variances, and sufficiently stable sample means. Log-ratio intervals require positive means in both arms. Strong skew, influential observations, or means poorly separated from zero can make the approximation unreliable; 100 seeds alone does not guarantee accuracy. Record relative standard errors `sqrt(s2/n)/m` for every arm mean, declare the diagnostic thresholds (for example, a maximum relative standard error per arm mean) in the frozen analysis settings before examining results, and mark the affected inference `approximation_unresolved` when those diagnostics fail. Retain the point estimates and raw data.
 
 Missing required observations give `incomplete`. A nonpositive mean makes the log-ratio interval unavailable under the zero rules in section 5.5. If an interval's estimated variance is zero, use `degenerate_observed` and leave its bounds unavailable rather than presenting a zero-width interval as certainty. Do not add epsilon or silently drop cases. The existing paired log-effect estimator targets a different statistic and must not supply this report's standard errors.
 
 ### 6.4 Multiple comparisons: six primary endpoints
 
-The primary family contains **three comparisons times two metrics = six panel-level mean-ratio effects**. Report pointwise 95% intervals and Bonferroni-adjusted intervals with individual coverage `1 - 0.05/6 = 99.1667%`. For the latter, use the standard-normal critical value `Phi^-1(1 - 0.05/(2*6)) = 2.638257` in section 6.3. This targets approximately 95% simultaneous coverage, subject to the accuracy of each analytic interval. [Bonferroni coverage principle](https://www.itl.nist.gov/div898/handbook/prc/section4/prc473.htm).
+The primary family contains **three comparisons times two metrics = six panel-level mean-ratio effects**. Report pointwise 95% intervals and Bonferroni-adjusted intervals with nominal individual coverage `1 - 0.05/6 = 99.1667%`. For the latter, use the standard-normal critical value `Phi^-1(1 - 0.05/(2*6)) = 2.638257` in section 6.3. When each individual interval attains its nominal level, the six adjusted intervals jointly cover all six effects with probability at least 95%; because each analytic interval is approximate, the simultaneous coverage is approximate too. [Bonferroni coverage principle](https://www.itl.nist.gov/div898/handbook/prc/section4/prc473.htm).
 
 The adjustment widens each log-scale half-width by `2.638257 / 1.959964`, approximately 1.346. It does not change the point estimate. Dependence through the shared wait-time observations or between D2 and N2 does not require additional independence assumptions for this adjustment.
 
