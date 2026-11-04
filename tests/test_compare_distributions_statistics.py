@@ -67,6 +67,64 @@ def test_nearest_rank_raw_mean_interval_and_distinct_seed_schedules():
     assert len([row for row in result["aggregates"] if row["scope"] == "panel"]) == 6
 
 
+def test_end_to_end_intervals_include_layout_sampling_without_changing_estimator():
+    manifest, rows = panel_fixture()
+    legacy = analyze(manifest, rows)
+    manifest["execution_mode"] = "end_to_end"
+    full = analyze(manifest, rows)
+    assert legacy["metadata"]["execution_mode"] == "fixed_layout"
+    assert "preparation, layouts" in legacy["metadata"]["conditioning_set"]
+    context = full["metadata"]["conditioning_set"]
+    assert "layout and routing vary" in context
+    for summary in full["arm_summaries"]:
+        assert summary["mean_ci"]["conditioning_set"] == context
+    for contrast in full["case_contrasts"]:
+        assert contrast["mean"]["ci"]["conditioning_set"] == context
+    for current, original in zip(full["aggregates"], legacy["aggregates"], strict=True):
+        assert current["mean"]["ratio"] == original["mean"]["ratio"]
+        assert current["mean"]["ci"]["lower"] == original["mean"]["ci"]["lower"]
+        assert current["mean"]["ci"]["upper"] == original["mean"]["ci"]["upper"]
+        assert current["mean"]["ci"]["conditioning_set"] == context
+        if current["scope"] == "panel":
+            assert current["mean"]["adjusted_ci"]["conditioning_set"] == context
+    assert "layouts sampled" in full["sensitivity"]["seed_bootstrap"]["resampling_unit"]
+
+
+@pytest.mark.parametrize("mode", [None, "fixed_layout", "end_to_end"])
+def test_report_identifies_execution_mode_and_reproduction_directory(mode, tmp_path):
+    from compare_distributions.report import _report
+
+    manifest, rows = panel_fixture()
+    if mode is not None:
+        manifest["execution_mode"] = mode
+    for case in manifest["cases"]:
+        case["preparation"] = {"coupling_width": 5, "dag_width": 4}
+    result = analyze(manifest, rows)
+    output = tmp_path / "fresh results"
+    report = _report(manifest, result, rows, [], [], [], output_dir=output)
+    assert f"--output '{output}'" in report
+    assert f"--mode {mode or 'fixed_layout'}" in report
+    if mode == "end_to_end":
+        assert "# Wait-time layout and routing:" in report
+        assert "100 transpilation seeds" in report
+        assert "Layouts are outcomes of each run" in report
+        assert "physical layouts vary by arm and seed" in report
+        assert "physical layout and preparation seed are fixed" not in report
+        assert "original logical circuit 4–4 qubits" in report
+    else:
+        assert "# Wait-time routing:" in report
+        assert "100 routing seeds" in report
+        assert "same frozen layout" in report
+        assert "physical layout and preparation seed are fixed" in report
+
+
+def test_unknown_execution_mode_is_rejected():
+    manifest, rows = panel_fixture()
+    manifest["execution_mode"] = "misspelled"
+    with pytest.raises(ValueError, match="Unknown execution mode"):
+        analyze(manifest, rows)
+
+
 def test_arithmetic_mean_ratios_squared_weights_and_six_endpoint_adjustment():
     manifest, rows = panel_fixture()
     result = analyze(manifest, rows)

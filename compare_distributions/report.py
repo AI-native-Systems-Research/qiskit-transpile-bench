@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import sys
 from collections import defaultdict
@@ -94,7 +95,7 @@ def _slug(value: str) -> str:
 
 
 class Figures:
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, execution_mode: str = "fixed_layout"):
         os.environ.setdefault("MPLCONFIGDIR", str((output_dir / ".matplotlib").resolve()))
         import matplotlib
 
@@ -102,6 +103,12 @@ class Figures:
         import matplotlib.pyplot as plt
 
         self.plt = plt
+        self.execution_mode = execution_mode
+        self.mode_label = (
+            "End-to-end layout + routing"
+            if execution_mode == "end_to_end"
+            else "Fixed-layout routing"
+        )
         self.root = output_dir / "figures"
         self.root.mkdir(parents=True, exist_ok=True)
         self.entries: list[dict] = []
@@ -121,10 +128,22 @@ class Figures:
         )
 
     def save(self, figure, stem: str, caption: str, category: str) -> None:
+        title = figure._suptitle
+        if title is None:
+            figure.suptitle(self.mode_label)
+        else:
+            title.set_text(f"{self.mode_label}\n{title.get_text()}")
         for extension in ("svg", "pdf", "png"):
             figure.savefig(self.root / f"{stem}.{extension}", dpi=150, bbox_inches="tight")
         self.plt.close(figure)
-        self.entries.append({"stem": stem, "caption": caption, "category": category})
+        self.entries.append(
+            {
+                "stem": stem,
+                "caption": f"{self.mode_label}. {caption}",
+                "category": category,
+                "execution_mode": self.execution_mode,
+            }
+        )
 
     @staticmethod
     def axis(axis, labels: list[str], xlabel: str, reference: float = 0) -> None:
@@ -331,6 +350,99 @@ class Figures:
             "ratios are aggregated using frozen weights.",
             "main",
         )
+
+    def spread_histograms(self, contrasts: list[dict], cases: list[dict]) -> list[dict]:
+        """Overlay all three per-case spread comparisons using shared bins in each panel."""
+        import numpy as np
+        from matplotlib.ticker import MaxNLocator
+
+        figure, axes = self.plt.subplots(2, 2, figsize=(13, 9), constrained_layout=True)
+        lookup = {(row["case_id"], row["comparator"], row["metric"]): row for row in contrasts}
+        panels = []
+        for row_index, metric in enumerate(METRICS):
+            for column, (statistic, label) in enumerate(
+                (("sd", "CV (SD / mean)"), ("iqr", "IQR / median"))
+            ):
+                axis = axes[row_index, column]
+                series = []
+                for comparator in COMPARATORS:
+                    values, case_ids, unavailable = [], [], []
+                    for case in cases:
+                        case_id = case["case_id"]
+                        row = lookup.get((case_id, comparator, metric), {})
+                        value = row.get(statistic, {}).get("normalized_difference_pp")
+                        if _finite(value):
+                            values.append(value)
+                            case_ids.append(case_id)
+                        else:
+                            unavailable.append(case_id)
+                    series.append(
+                        {
+                            "comparator": comparator,
+                            "case_ids": case_ids,
+                            "values": values,
+                            "unavailable_case_ids": unavailable,
+                        }
+                    )
+                pooled = [value for item in series for value in item["values"]]
+                edges = (
+                    np.histogram_bin_edges(pooled, bins=20) if pooled else np.linspace(-1, 1, 21)
+                )
+                for item, style in zip(series, ("-", "--", ":"), strict=True):
+                    counts, _ = np.histogram(item["values"], bins=edges)
+                    item["counts"] = counts.tolist()
+                    legend = f"vs {item['comparator']} (n={len(item['values'])})"
+                    if item["unavailable_case_ids"]:
+                        legend += f"; unavailable: {len(item['unavailable_case_ids'])}"
+                    axis.stairs(
+                        counts,
+                        edges,
+                        color=COLORS[item["comparator"]],
+                        linestyle=style,
+                        linewidth=2,
+                        label=legend,
+                    )
+                axis.axvline(0, color="#64748B", linewidth=1, linestyle="--", zorder=0)
+                axis.set_title(f"{metric} · {label}")
+                axis.set_xlabel("Relative-spread difference (pp): wait_time − comparator")
+                axis.set_ylabel("Number of cases (unweighted)")
+                axis.set_ylim(bottom=0)
+                axis.yaxis.set_major_locator(MaxNLocator(integer=True))
+                axis.grid(axis="y", color="#E2E8F0", linewidth=0.7)
+                axis.set_axisbelow(True)
+                axis.legend(fontsize=8, frameon=False)
+                if not pooled:
+                    axis.text(
+                        0.5, 0.4, "No available spread comparisons",
+                        transform=axis.transAxes, ha="center", color="#64748B",
+                    )
+                panels.append(
+                    {
+                        "metric": metric,
+                        "statistic": statistic,
+                        "field": "normalized_difference_pp",
+                        "units": "percentage_points",
+                        "weighting": "unweighted_case_counts",
+                        "bin_edges": edges.tolist(),
+                        "series": series,
+                    }
+                )
+        figure.suptitle(
+            f"Spread across {len(cases)} cases | all three wait_time comparisons\n"
+            "Negative = lower relative spread for wait_time · descriptive case counts",
+            fontsize=14,
+        )
+        self.save(
+            figure,
+            "spread_histograms",
+            "Overlaid histograms of per-case CV and IQR-to-median differences for D2/N2. "
+            "All three comparisons share 20 equal-width bins within each panel; each available "
+            "case contributes one unweighted count per comparison. Negative differences mean "
+            "lower relative spread for wait_time. Unavailable cases are identified in legends "
+            "and plot_data.json. These are descriptive case distributions, without intervals.",
+            "main",
+        )
+        return panels
 
     def family_forests(self, contrasts: list[dict], cases: list[dict]) -> None:
         families: dict[str, list[str]] = defaultdict(list)
@@ -739,26 +851,30 @@ def _sensitivity_section(analysis: dict) -> list[str]:
 
     lookup = {(row["metric"], row["comparator"]): row for row in bootstrap["endpoints"]}
     case_count = analysis["metadata"]["case_count"]
+    end_to_end = analysis["metadata"].get("execution_mode") == "end_to_end"
     lines = [
         "### Sensitivity analysis: seed-bootstrap mean intervals (not pre-registered)",
         "",
-        "**In plain terms:** the frozen rule above withheld every mean interval because a few "
-        "case/arm distributions are nearly constant with a rare outlier (for example 99 seeds "
-        "at one value and 1 seed at another), which looks highly skewed to the screens. "
-        "This section adds intervals that do not depend on those screens. They were added after "
-        "seeing the data and do not replace the pre-registered `approximation_unresolved` "
-        "status above.",
+        "**Interpretation:** this exploratory analysis resamples observed outcomes without "
+        "applying the analytic approximation screens. It does not replace the frozen analytic "
+        "interval statuses above. "
+        + (
+            "It was introduced after inspecting the earlier fixed-layout study and is retained "
+            "here as a sensitivity analysis of the new end-to-end outcomes."
+            if end_to_end
+            else "It was introduced after inspecting the fixed-layout study's outcomes."
+        ),
         "",
         f"**Method:** the 100 seeds of every case/arm were resampled with replacement "
         f"{bootstrap['replicates']:,} times (RNG seed {bootstrap['rng_seed']}); each time the "
         f"weighted panel mean effect was recomputed with the same {case_count} cases and frozen "
         "weights. "
         "The interval is the middle 95% (or 99.1667% for the Bonferroni column) of those "
-        "recomputed effects. The last column shows the analytic log-delta interval that the "
-        "frozen screens withheld, for comparison only.",
+        "recomputed effects. The last column shows the analytic log-delta interval without "
+        "diagnostic screening, for comparison only.",
         "",
         "| Metric | Comparison | Mean change % | Bootstrap 95% interval | "
-        "Bootstrap Bonferroni 99.1667% interval | Withheld analytic 95% interval |",
+        "Bootstrap Bonferroni 99.1667% interval | Unscreened analytic 95% interval |",
         "| --- | --- | ---: | --- | --- | --- |",
     ]
     for metric in METRICS:
@@ -797,12 +913,12 @@ def _sensitivity_section(analysis: dict) -> list[str]:
     ]
     largest_gap = max(gaps, default=0.0)
     agreement = (
-        "The bootstrap and withheld analytic 95% bounds differ by "
+        "The bootstrap and unscreened analytic 95% bounds differ by "
         + ("less than 0.01" if largest_gap < 0.01 else f"at most {largest_gap:.2f}")
         + " percentage points"
         + (
-            ", so the frozen screens were conservative for these panel effects rather than "
-            "signalling a real approximation problem."
+            "; agreement between these methods does not establish their coverage "
+            "for unseen outcomes."
             if largest_gap < 0.5
             else "; the two methods disagree noticeably, so treat both with caution."
         )
@@ -834,10 +950,15 @@ def _report(
     regressions: list[dict],
     figure_entries: list[dict],
     validation: dict | None = None,
+    output_dir: Path | None = None,
 ) -> str:
     panel = [row for row in analysis["aggregates"] if row["scope"] == "panel"]
     lookup = {(row["metric"], row["comparator"]): row for row in panel}
     cases = manifest["cases"]
+    execution_mode = manifest.get("execution_mode", "fixed_layout")
+    end_to_end = execution_mode == "end_to_end"
+    seed_kind = "transpilation" if end_to_end else "routing"
+    output_arg = shlex.quote(str(output_dir or Path("compare_distributions_results")))
     good = sum(row.get("status") == "ok" for row in observations)
     expected = len(cases) * 100 * 4
     settings = manifest.get("analysis_settings", {})
@@ -851,11 +972,24 @@ def _report(
     for case in cases:
         family_weights[case["family"]] += case["weight"]
     lines = [
-        "# Wait-time routing: distribution benchmark",
+        "# Wait-time layout and routing: distribution benchmark"
+        if end_to_end
+        else "# Wait-time routing: distribution benchmark",
         "",
         f"**Collection: {good:,}/{expected:,} successful observations; "
-        f"{len(cases)} frozen scored cases, four presets, 100 routing seeds per case and arm.** "
+        f"{len(cases)} frozen scored cases, four presets, "
+        f"100 {seed_kind} seeds per case and arm.** "
         f"Statistical completeness: `{analysis['completeness']['status']}`.",
+        "",
+        f"**Execution mode:** `{execution_mode}`. "
+        + (
+            "Every arm and seed runs the full preset pipeline from the original logical circuit. "
+            "The arm's heuristic is used throughout SABRE layout search and routing. Layouts "
+            "are outcomes of each run, not a shared fixed input."
+            if end_to_end
+            else "All arms route a common prepared circuit from the same frozen layout. "
+            "The comparison is conditional on that layout."
+        ),
         "",
         "The three questions are whether wait_time changes average/typical D2 and N2, "
         "seed variability, and the P90 upper tail relative to decay, lookahead, and basic. "
@@ -931,6 +1065,13 @@ def _report(
     lines += _sensitivity_section(analysis)
     lines += [
         "## Spread, tails, and local regressions",
+        "",
+        "![All three spread-comparison histograms](figures/spread_histograms.png)",
+        "",
+        "The histograms overlay wait_time versus decay, lookahead, and basic, using shared "
+        "bins within each panel. Each case contributes one unweighted count; negative values "
+        "mean lower relative spread for wait_time. D2/N2 and CV/IQR-to-median have separate "
+        "panels. These descriptive case counts differ from the weighted panel estimates.",
         "",
         "![Descriptive P90 ratios](figures/tail_ratios.png)",
         "",
@@ -1008,11 +1149,22 @@ def _report(
         "| lookahead | 1, Constant | [0.5 / Q], Constant | None | None |",
         "| basic | 1, Size | None | None | None |",
         "",
-        "Q is the case's coupling width; the attempt limit is 10 × DAG width. "
+        "Q is the case's coupling width; the attempt limit is 10 × physical target width. "
+        if end_to_end
+        else "Q is the case's coupling width; the attempt limit is 10 × DAG width. ",
         "Only wait_time versus decay isolates the wait-time component. The lookahead "
         "comparison also changes decay; the basic comparison also changes lookahead, decay, "
-        "and basic scaling. All four arms share one pinned candidate build and the case's "
-        "frozen preparation, layout, target, and downstream processing. Independently initialized "
+        "and basic scaling. "
+        + (
+            "The selected components configure both integrated SabreLayout and any fallback "
+            "SabreSwap. All four arms share one pinned candidate build, original circuit, target, "
+            "optimization settings, and trial budgets. Each arm and seed performs its own layout "
+            "search and routing; subsequent translation and optimization use the same settings. "
+            if end_to_end
+            else "All four arms share one pinned candidate build and the case's frozen "
+            "preparation, layout, target, and downstream processing. "
+        )
+        + "Independently initialized "
         "case/arm streams supply 100 unique seeds each; seed IDs are provenance, never matching "
         "keys. The same wait_time observations are reused in all three comparisons.",
         "",
@@ -1089,10 +1241,18 @@ def _report(
         dag = [pair[1] for pair in widths]
         lines += [
             f"**Widths:** coupling {min(coupling)}–{max(coupling)} qubits; "
-            f"prepared DAG {min(dag)}–{max(dag)} qubits. Each case's physical layout and "
-            "preparation seed are fixed before arm sampling; exact widths, resolved heuristic "
-            "components, layout hashes, and pipeline boundaries are in "
-            "[case_configuration.csv](case_configuration.csv).",
+            + (
+                f"original logical circuit {min(dag)}–{max(dag)} qubits. Inputs and target "
+                "widths are frozen before sampling; physical layouts vary by arm and seed. "
+                "[case_configuration.csv](case_configuration.csv) records fixed inputs and "
+                "resolved heuristic components; [raw_observations.csv](raw_observations.csv) "
+                "records each run's initialization and layout hashes."
+                if end_to_end
+                else f"prepared DAG {min(dag)}–{max(dag)} qubits. Each case's physical layout and "
+                "preparation seed are fixed before arm sampling; exact widths, resolved heuristic "
+                "components, layout hashes, and pipeline boundaries are in "
+                "[case_configuration.csv](case_configuration.csv)."
+            ),
             "",
         ]
     for key in (
@@ -1108,8 +1268,9 @@ def _report(
             lines += [f"**{key.replace('_', ' ').capitalize()}:** `{manifest[key]}`", ""]
     lines += [
         "Full source modifications, build identity, host/thread controls, input/target hashes, "
-        "native gates, case preparation/layout identities, internal trial budgets, seeds, "
+        "native gates, fixed case configuration, internal trial budgets, seeds, "
         "and analysis settings are retained in [manifest.json](manifest.json). "
+        "Per-observation initialization and layout identities are retained in the raw records. "
         "The collection status and checks are retained with raw observations. "
         "This report has its own completeness status and does not issue the legacy "
         "two-build PASS/NO_IMPROVEMENT decision.",
@@ -1131,8 +1292,8 @@ def _report(
         "uv sync --extra verifier --extra comparison",
         ".venv/bin/python -m compare_distributions prepare "
         "--source /Users/ophir/PycharmProjects/qiskit-evolved "
-        "--output ./compare_distributions_results",
-        ".venv/bin/python -m compare_distributions report --output ./compare_distributions_results",
+        f"--mode {execution_mode} --output {output_arg}",
+        f".venv/bin/python -m compare_distributions report --output {output_arg}",
         "```",
         "",
         "[Artifact schema](artifacts.md) documents the raw records, CSV tables, complete "
@@ -1148,6 +1309,7 @@ def generate_report(
 ) -> dict:
     """Write complete supporting data and render report figures without rerunning collection."""
     output_dir = Path(output_dir)
+    execution_mode = manifest.get("execution_mode", "fixed_layout")
     output_dir.mkdir(parents=True, exist_ok=True)
     archived_source = output_dir / "analysis_source" / "compare_distributions"
     archived_source.mkdir(parents=True, exist_ok=True)
@@ -1178,20 +1340,23 @@ def generate_report(
         output_dir / "case_configuration.csv",
         [
             {
-                key: case.get(key)
-                for key in (
-                    "case_id",
-                    "family",
-                    "optimization_level",
-                    "weight",
-                    "circuit",
-                    "target",
-                    "native_basis",
-                    "preparation_seed",
-                    "preparation",
-                    "configuration_digests",
-                    "resolved_components",
-                )
+                "execution_mode": execution_mode,
+                **{
+                    key: case.get(key)
+                    for key in (
+                        "case_id",
+                        "family",
+                        "optimization_level",
+                        "weight",
+                        "circuit",
+                        "target",
+                        "native_basis",
+                        "preparation_seed",
+                        "preparation",
+                        "configuration_digests",
+                        "resolved_components",
+                    )
+                },
             }
             for case in manifest["cases"]
         ],
@@ -1211,24 +1376,27 @@ def generate_report(
                 }
             )
     _csv(output_dir / "tail_observations.csv", tails)
+    figures = Figures(output_dir, execution_mode=execution_mode)
+    panel = [row for row in analysis["aggregates"] if row["scope"] == "panel"]
+    for metric in METRICS:
+        figures.aggregate_grid(panel, metric, len(manifest["cases"]))
+    figures.primary_forest(panel, len(manifest["cases"]))
+    figures.tail_ratios(panel, len(manifest["cases"]))
+    spread_histograms = figures.spread_histograms(analysis["case_contrasts"], manifest["cases"])
     _json(
         output_dir / "plot_data.json",
         {
+            "execution_mode": execution_mode,
             "comparison_order": [f"wait_time_vs_{comparator}" for comparator in COMPARATORS],
             "aggregates": analysis["aggregates"],
             "case_contrasts": analysis["case_contrasts"],
+            "spread_histograms": spread_histograms,
             "selected_distributions": selected,
             "material_regressions": regressions,
             "raw_distributions_source": "raw_observations.csv",
             "case_order": [case["case_id"] for case in manifest["cases"]],
         },
     )
-    figures = Figures(output_dir)
-    panel = [row for row in analysis["aggregates"] if row["scope"] == "panel"]
-    for metric in METRICS:
-        figures.aggregate_grid(panel, metric, len(manifest["cases"]))
-    figures.primary_forest(panel, len(manifest["cases"]))
-    figures.tail_ratios(panel, len(manifest["cases"]))
     figures.family_forests(analysis["case_contrasts"], manifest["cases"])
     figures.tail_heatmaps(analysis["case_contrasts"], manifest["cases"])
     figures.distributions(observations, selected)
@@ -1237,13 +1405,28 @@ def generate_report(
     validation = json.loads(validation_file.read_text()) if validation_file.exists() else None
     (output_dir / "report.md").write_text(
         _report(
-            manifest, analysis, observations, selected, regressions, figures.entries, validation
+            manifest,
+            analysis,
+            observations,
+            selected,
+            regressions,
+            figures.entries,
+            validation,
+            output_dir=output_dir,
         )
     )
     (output_dir / "artifacts.md").write_text(
         "# Artifact schema\n\n"
-        "`manifest.json` is the frozen collection and analysis contract. Its cases retain original "
-        "weights, per-arm routing seed lists, input/target identity, preparation/layout identity, "
+        f"Execution mode: `{execution_mode}`. "
+        + (
+            "Each observation samples full transpilation, including layout search and routing. "
+            "Physical layouts and initialized-circuit hashes are run outputs, recorded in the "
+            "raw observations.\n\n"
+            if execution_mode == "end_to_end"
+            else "Each observation samples routing from a shared, frozen prepared layout.\n\n"
+        )
+        + "`manifest.json` is the frozen collection and analysis contract. Its cases retain "
+        "original weights, per-arm seed lists, input/target identity, execution mode, "
         "and resolved configuration. Excluded cases and their reasons are exported "
         "in `eligibility.csv`.\n\n"
         "`raw_observations.csv` has one record per collected case/arm/seed. D2/N2 are native "
@@ -1274,7 +1457,9 @@ def generate_report(
         "Bounds are on the ratio scale.\n\n"
         "`material_regressions.csv` preserves every finding meeting the frozen descriptive "
         "selection threshold. `plot_data.json` contains plotted effect rows, case order, selected "
-        "distribution reasons, and a reference to the raw data. `figures/index.md` links every "
+        "distribution reasons, and a reference to the raw data. Its `spread_histograms` contains "
+        "shared bin edges and per-comparison case IDs, values, unweighted bin counts, and "
+        "unavailable case IDs for each metric/spread panel. `figures/index.md` links every "
         "standalone SVG/PDF figure and PNG preview. `report_metadata.json` records all figure "
         "captions and selected cases, analysis source hashes, and dependency versions. "
         "`analysis_source/` preserves the exact analysis and reporting implementation, separate "
@@ -1282,6 +1467,7 @@ def generate_report(
     )
     metadata = {
         "format": "qtb-distribution-report/1",
+        "execution_mode": execution_mode,
         "session_id": manifest.get("session_id"),
         "analysis_source_sha256": source_hashes,
         "python": sys.version,

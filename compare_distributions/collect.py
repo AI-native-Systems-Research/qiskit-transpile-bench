@@ -17,10 +17,12 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ARMS = ("wait_time", "decay", "lookahead", "basic")
+EXECUTION_MODES = ("end_to_end", "fixed_layout")
 THREAD_ENV = {
     "QISKIT_PARALLEL": "FALSE",
     "QISKIT_NUM_PROCS": "1",
@@ -86,6 +88,27 @@ def harness_inventory():
     return {str(p.relative_to(ROOT)): file_hash(p) for p in sorted(files)}
 
 
+def snapshot_entry_points(source, snapshot):
+    """Discover plugins from the frozen candidate, rather than an installed Qiskit version."""
+    project = source / "pyproject.toml"
+    if not project.exists():
+        return {}
+    config = tomllib.loads(project.read_text())
+    version = (source / "qiskit/VERSION.txt").read_text().strip()
+    metadata = snapshot / f"qiskit-{version}.dist-info"
+    metadata.mkdir(exist_ok=True)
+    (metadata / "METADATA").write_text(f"Metadata-Version: 2.1\nName: qiskit\nVersion: {version}\n")
+    entries = config["project"]["entry-points"]
+    (metadata / "entry_points.txt").write_text(
+        "\n".join(
+            f"[{group}]\n" + "\n".join(f"{name} = {value}" for name, value in values.items())
+            for group, values in entries.items()
+        )
+        + "\n"
+    )
+    return {str(p.relative_to(snapshot)): file_hash(p) for p in metadata.iterdir()}
+
+
 def validate_session(output, manifest, verify_build=True):
     """Reject altered frozen manifests or candidate artifacts before cache reuse."""
     root = Path(output)
@@ -99,6 +122,9 @@ def validate_session(output, manifest, verify_build=True):
         for relative, expected in inventory.items():
             if file_hash(root / "build/source" / relative) != expected:
                 raise ValueError(f"Frozen source file changed: {relative}")
+        for relative, expected in manifest["source"].get("runtime_metadata", {}).items():
+            if file_hash(root / "build/source" / relative) != expected:
+                raise ValueError(f"Frozen runtime metadata changed: {relative}")
         if (
             file_hash(root / manifest["source"]["binary_file"])
             != manifest["source"]["binary_sha256"]
@@ -122,7 +148,9 @@ def configure_imports(output):
     for key, value in THREAD_ENV.items():
         os.environ[key] = value
     for p in [ROOT / "src", ROOT / "worker", Path(output) / "build/source"]:
-        sys.path.insert(0, str(p))
+        path = str(p)
+        if path not in sys.path:
+            sys.path.insert(0, path)
     import qiskit
 
     expected = (Path(output) / "build/source/qiskit").resolve()
@@ -132,6 +160,58 @@ def configure_imports(output):
 
     if not hasattr(Heuristic, "with_wait_time"):
         raise RuntimeError("Candidate binary does not implement wait-time scoring")
+
+
+def make_heuristic(arm, width):
+    """Resolve the same complete preset for layout search and physical routing."""
+    from qiskit._accelerate.sabre import Heuristic, SetScaling
+
+    if arm not in ARMS:
+        raise ValueError(f"Unknown heuristic arm: {arm}")
+    heuristic = Heuristic(attempt_limit=10 * width).with_basic(
+        1.0, SetScaling.Size if arm == "basic" else SetScaling.Constant
+    )
+    if arm != "basic":
+        heuristic = heuristic.with_lookahead([0.5 / width], SetScaling.Constant)
+    if arm in ("decay", "wait_time"):
+        heuristic = heuristic.with_decay(0.001, 5)
+    if arm == "wait_time":
+        heuristic = heuristic.with_wait_time(2.2e-5)
+    return heuristic
+
+
+def configure_sabre(pm, arm, trials):
+    """Configure SABRE passes inside all conditional controllers without changing the preset."""
+    import inspect
+
+    from qiskit.transpiler.passes import SabreLayout, SabreSwap
+
+    if "heuristic" not in inspect.signature(SabreLayout.__init__).parameters:
+        raise RuntimeError("End-to-end collection requires SabreLayout(heuristic=...)")
+
+    def walk(task):
+        if hasattr(task, "tasks"):
+            for child in task.tasks:
+                walk(child)
+        elif isinstance(task, SabreLayout):
+            if task.routing_pass is not None:
+                raise ValueError("An explicit SabreLayout routing_pass is unsupported")
+            task.heuristic = make_heuristic(arm, task.target.num_qubits)
+            task.layout_trials = trials
+            task.swap_trials = trials
+            task.skip_routing = False
+        elif isinstance(task, SabreSwap):
+            task.heuristic = make_heuristic(arm, task.target.num_qubits)
+            task.trials = trials
+
+    walk(pm.to_flow_controller())
+
+
+def pipeline_fingerprint(pm):
+    """Retain custom native Heuristic reprs in the otherwise JSON-native fingerprint."""
+    from qtb_worker.adapter import fingerprint
+
+    return json.loads(json.dumps(fingerprint(pm), default=repr))
 
 
 def drop_stages(pm, stages):
@@ -153,13 +233,12 @@ def pin_layout_trials(pm, trials):
     walk(pm.to_flow_controller())
 
 
-def prepare_case(output, case, trials):
+def prepare_case(output, case, trials, execution_mode="end_to_end"):
     configure_imports(output)
     from qtb.canonical import read_circuit, read_json, verify_artifact, write_circuit
     from qtb_worker.adapter import (
         export_circuit,
         export_layout,
-        fingerprint,
         import_circuit,
         import_target,
         preset,
@@ -172,6 +251,23 @@ def prepare_case(output, case, trials):
     header, operations = read_circuit(input_path)
     circuit = import_circuit({"header": header, "operations": operations})
     target = import_target(read_json(target_path))
+    if execution_mode == "end_to_end":
+        # Freeze the logical input only. Initialization and layout are sampled afresh per run.
+        width = target.num_qubits
+        return dict(
+            case,
+            preparation={
+                "file": str(input_path.relative_to(root)),
+                "sha256": case["circuit"]["sha256"],
+                "layout_digest": None,
+                "dag_width": circuit.num_qubits,
+                "coupling_width": width,
+                "boundary": (
+                    "original logical input before initialization; layout varies per arm and seed"
+                ),
+            },
+            resolved_components={arm: resolved_components(arm, width, width) for arm in ARMS},
+        )
     preparation_case = copy.deepcopy(case)
     preparation_case["options"]["routing_method"] = "none"
     pm = preset(preparation_case, target, case["preparation_seed"])
@@ -194,7 +290,7 @@ def prepare_case(output, case, trials):
             "sha256": circuit_digest,
             "layout": layout,
             "layout_digest": digest(layout),
-            "pipeline": fingerprint(pm),
+            "pipeline": pipeline_fingerprint(pm),
             "seconds": time.monotonic() - started,
             "dag_width": prepared.num_qubits,
             "coupling_width": coupling_width,
@@ -204,7 +300,9 @@ def prepare_case(output, case, trials):
     )
 
 
-def freeze(output, source, profile, master_seed, trials, workers):
+def freeze(output, source, profile, master_seed, trials, workers, execution_mode="end_to_end"):
+    if execution_mode not in EXECUTION_MODES:
+        raise ValueError(f"Unknown execution mode: {execution_mode}")
     root, source = Path(output).resolve(), Path(source).resolve()
     manifest_path = root / "manifest.json"
     if manifest_path.exists():
@@ -214,6 +312,7 @@ def freeze(output, source, profile, master_seed, trials, workers):
             or manifest["master_seed"] != master_seed
             or manifest["trial_budgets"]["routing_trials"] != trials
             or manifest["profile_sha256"] != file_hash(profile)
+            or manifest.get("execution_mode", "fixed_layout") != execution_mode
         ):
             raise ValueError("Frozen session arguments changed; use a new output directory")
         if manifest["harness"]["collection_files"] != harness_inventory():
@@ -245,6 +344,7 @@ def freeze(output, source, profile, master_seed, trials, workers):
         raise ValueError("Require one prebuilt candidate native extension in source/qiskit")
     binary = binaries[0]
     shutil.copy2(binary, snapshot / "qiskit" / binary.name)
+    runtime_metadata = snapshot_entry_points(source, snapshot)
     native_hash = file_hash(binary)
     fingerprints = {}
     for pattern in (
@@ -271,7 +371,8 @@ def freeze(output, source, profile, master_seed, trials, workers):
         if not math.isclose(weight_total, 1.0, rel_tol=0, abs_tol=1e-12):
             case["weight"] /= weight_total
         case["seeds"] = {arm: seed_list(master_seed, case["case_id"], arm) for arm in ARMS}
-        case["preparation_seed"] = seed_list(master_seed, case["case_id"], "preparation")[0]
+        if execution_mode == "fixed_layout":
+            case["preparation_seed"] = seed_list(master_seed, case["case_id"], "preparation")[0]
         cases.append(case)
     settings = {
         "max_relative_standard_error": 0.1,
@@ -290,7 +391,8 @@ def freeze(output, source, profile, master_seed, trials, workers):
     for case in cases:
         first_per_family.setdefault(case["family"], case["case_id"])
     manifest = {
-        "format": "qtb-independent-distributions/1",
+        "format": "qtb-independent-distributions/2",
+        "execution_mode": execution_mode,
         "created_at": dt.datetime.now(dt.UTC).isoformat(),
         "source": {
             "path": str(source),
@@ -299,6 +401,7 @@ def freeze(output, source, profile, master_seed, trials, workers):
             "source_digest": digest(inventory),
             "binary_sha256": native_hash,
             "binary_file": f"build/source/qiskit/{binary.name}",
+            "runtime_metadata": runtime_metadata,
             "build_mode": "frozen prebuilt local release artifact",
             "build_settings": "See build/release_fingerprints.json; original build command unknown",
             "release_artifact_matches": (source / "target/release/libqiskit_pyext.dylib").is_file()
@@ -333,6 +436,13 @@ def freeze(output, source, profile, master_seed, trials, workers):
         "master_seed": master_seed,
         "seed_protocol": "SHA256(master_seed,case_id,arm) initializes independent Python Random; "
         "sample 100 unique uint32 values per stream; no pairing across lists",
+        "pipeline": (
+            "Each arm and seed runs the full preset from the original logical circuit; "
+            "the arm heuristic controls integrated SabreLayout search/routing and fallback "
+            "SabreSwap. Layouts are outcomes, with identical optimization settings and budgets."
+            if execution_mode == "end_to_end"
+            else "Fixed initialization and decay-selected layout; arm-specific routing only."
+        ),
         "trial_budgets": {
             "routing_trials": trials,
             "layout_trials": trials,
@@ -353,8 +463,8 @@ def freeze(output, source, profile, master_seed, trials, workers):
         "representative_case_ids": list(first_per_family.values()),
         "expected_observations": len(cases) * 400,
         "reuse_audit": (
-            "Existing baseline/evolved sessions use shared seeds and seed-dependent layouts; "
-            "no compatible independent-arm observations reused."
+            "Fresh collection for this execution mode and frozen build; no observations "
+            "from fixed-layout or baseline/evolved studies reused."
         ),
         "tuning_disclosure": (
             "Preset settings are copied without tuning in this study. Prior use of "
@@ -365,7 +475,10 @@ def freeze(output, source, profile, master_seed, trials, workers):
     write_json(root / "design.json", manifest)
     prepared = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
-        jobs = {pool.submit(prepare_case, str(root), c, trials): c["case_id"] for c in cases}
+        jobs = {
+            pool.submit(prepare_case, str(root), c, trials, execution_mode): c["case_id"]
+            for c in cases
+        }
         for future in concurrent.futures.as_completed(jobs):
             case = future.result()
             prepared.append(case)
@@ -377,12 +490,13 @@ def freeze(output, source, profile, master_seed, trials, workers):
             arm: digest(
                 {
                     "build_id": build_id,
+                    "execution_mode": execution_mode,
                     "case_id": case["case_id"],
                     "circuit": case["circuit"],
                     "target": case["target"],
                     "preparation_sha256": case["preparation"]["sha256"],
                     "layout_digest": case["preparation"]["layout_digest"],
-                    "preparation_seed": case["preparation_seed"],
+                    "preparation_seed": case.get("preparation_seed"),
                     "options": case["options"],
                     "constraint_form": case["constraint_form"],
                     "basis_gates": case.get("basis_gates"),
@@ -449,24 +563,180 @@ def archive_failures(output):
         temporary.replace(path)
 
 
-def run_case_arm(output, case, arm, manifest):
-    configure_imports(output)
+def build_pass_manager(case, target, circuit, arm, seed, trials, execution_mode):
+    """Build a fresh pass manager so each outer seed controls all stochastic stages."""
     from qiskit.transpiler import Layout, PassManager
     from qiskit.transpiler.passes import SabreSwap, SetLayout
 
+    from qtb_worker.adapter import add_tap, preset
+
+    if execution_mode == "end_to_end":
+        pm = preset(case, target, seed)
+        configure_sabre(pm, arm, trials)
+        taps = {stage: add_tap(pm, stage) for stage in ("init", "routing")}
+    else:
+        pm = preset(case, target, case["preparation_seed"])
+        drop_stages(pm, ("init", "layout"))
+        pm.pre_routing = None
+        pm.post_routing = None
+        pm.routing = PassManager(
+            [
+                SetLayout(Layout.generate_trivial_layout(*circuit.qregs)),
+                SabreSwap(target, heuristic=arm, seed=seed, trials=trials),
+            ]
+        )
+        taps = {"routing": add_tap(pm, "routing")}
+    return pm, taps
+
+
+def sample_context(output, case):
+    """Load immutable input/target once per case-arm worker, without choosing a layout."""
     from qtb.canonical import read_circuit, read_json, verify_artifact
+    from qtb_worker.adapter import import_circuit, import_target
+
+    root = Path(output)
+    header, operations = read_circuit(verify_artifact(root, case["preparation"], circuit=True))
+    target_data = read_json(verify_artifact(root / "fixtures", case["target"]))
+    return {
+        "header": header,
+        "operations": operations,
+        "circuit": import_circuit({"header": header, "operations": operations}),
+        "target_data": target_data,
+        "target": import_target(target_data),
+    }
+
+
+def evaluate_sample(output, case, arm, seed, manifest, context=None):
+    """Compile and verify one frozen sample; used identically by collection and replay audit."""
+    configure_imports(output)
     from qtb.metrics import StructuralChecker, layout_errors
     from qtb.metrics.replay import replay
-    from qtb_worker.adapter import (
-        add_tap,
-        export_circuit,
-        export_layout,
-        fingerprint,
-        import_circuit,
-        import_target,
-        preset,
-    )
+    from qtb_worker.adapter import export_circuit, export_layout
 
+    execution_mode = manifest.get("execution_mode", "fixed_layout")
+    context = sample_context(output, case) if context is None else context
+    circuit, target = context["circuit"], context["target"]
+    row = {
+        "case_id": case["case_id"],
+        "arm": arm,
+        "arm_id": f"preset_{arm}",
+        "seed": seed,
+        "build_id": manifest["build_id"],
+        "configuration_digest": case["configuration_digests"][arm],
+        "execution_mode": execution_mode,
+        "preparation_sha256": case["preparation"]["sha256"],
+    }
+    pipeline = {}
+    signal.signal(signal.SIGALRM, _sample_timeout)
+    before = time.monotonic()
+    try:
+        pm, taps = build_pass_manager(
+            case,
+            target,
+            circuit,
+            arm,
+            seed,
+            manifest["trial_budgets"]["routing_trials"],
+            execution_mode,
+        )
+        pipeline = pipeline_fingerprint(pm)
+        sabre_passes = []
+
+        def callback(**kwargs):
+            pass_ = kwargs["pass_"]
+            name = type(pass_).__name__
+            if name in ("SabreLayout", "SabreSwap"):
+                sabre_passes.append(
+                    {
+                        "pass": name,
+                        "heuristic": repr(pass_.heuristic),
+                        "layout_trials": getattr(pass_, "layout_trials", None),
+                        "swap_trials": getattr(pass_, "swap_trials", None),
+                        "max_iterations": getattr(pass_, "max_iterations", None),
+                        "trials": getattr(pass_, "trials", None),
+                        "skip_routing": getattr(pass_, "skip_routing", None),
+                    }
+                )
+
+        signal.setitimer(signal.ITIMER_REAL, case["timeout_s"])
+        output_circuit = pm.run(circuit, callback=callback)
+        for stage, tap in taps.items():
+            if tap.error or tap.captured is None:
+                raise RuntimeError(f"{stage} snapshot unavailable: {tap.error}")
+        captured, routed_layout = taps["routing"].captured
+        routed = export_circuit(captured)
+        if execution_mode == "end_to_end":
+            initialized_circuit, init_layout = taps["init"].captured
+            initialized = export_circuit(initialized_circuit)
+            elided = init_layout["final_index_layout"] if init_layout else None
+        else:
+            initialized = {"header": context["header"], "operations": context["operations"]}
+            elided = None
+        c6 = replay(
+            initialized["operations"],
+            routed["operations"],
+            routed_layout,
+            initialized["header"]["num_qubits"],
+            routed["header"]["num_qubits"],
+            elided,
+        )
+        final = export_circuit(output_circuit)
+        final_layout = export_layout(output_circuit, circuit.num_qubits)
+        checker = StructuralChecker(
+            final["header"], context["target_data"], case["constraint_form"]
+        )
+        for operation in final["operations"]:
+            checker.consume(operation)
+        checker.errors.extend(
+            layout_errors(final_layout, circuit.num_qubits, output_circuit.num_qubits)
+        )
+        if final_layout == routed_layout:
+            c6["layout_equality"] = "matched"
+        elif case["optimization_level"] == 3:
+            c6.update(
+                layout_equality="skipped",
+                layout_disagreement={
+                    "reason": "Level-3 optimization may reapply layout",
+                    "full": final_layout,
+                    "routing_snapshot": routed_layout,
+                },
+            )
+        else:
+            c6.update(
+                status="mismatch",
+                layout_equality="mismatch",
+                detail="Output and routing-snapshot layouts differ",
+            )
+        c0 = checker.result()
+        ok = c6["status"] == c0["status"] == "verified"
+        row.update(
+            status="ok" if ok else "failed",
+            D2=c0.get("D2"),
+            N2=c0.get("N2"),
+            checks={"C0": c0, "C6": c6},
+            init_sha256=digest(initialized),
+            routed_sha256=digest(routed),
+            output_sha256=digest(final),
+            layout=routed_layout,
+            layout_digest=digest(routed_layout),
+            final_layout_digest=digest(final_layout),
+            sabre_passes=sabre_passes,
+        )
+        if not ok:
+            write_json(
+                Path(output) / "failures" / f"{digest([case['case_id'], arm, seed])}.json",
+                {"row": row, "initialized": initialized, "routed": routed, "final": final},
+            )
+    except Exception as exc:
+        row.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    row["elapsed_s"] = time.monotonic() - before
+    return row, pipeline
+
+
+def run_case_arm(output, case, arm, manifest):
+    configure_imports(output)
     root = Path(output)
     raw_path = root / "raw" / f"{digest(case['case_id'])[:16]}__{arm}.jsonl"
     raw_path.parent.mkdir(exist_ok=True)
@@ -476,121 +746,46 @@ def run_case_arm(output, case, arm, manifest):
         else []
     )
     done = {r["seed"] for r in existing}
-    remaining = [s for s in case["seeds"][arm] if s not in done]
+    remaining = [seed for seed in case["seeds"][arm] if seed not in done]
     if not remaining:
         return {"case_id": case["case_id"], "arm": arm, "cached": len(done), "new": 0}
-    prepared_path = verify_artifact(root, case["preparation"], circuit=True)
-    header, operations = read_circuit(prepared_path)
-    circuit = import_circuit({"header": header, "operations": operations})
-    target_data = read_json(verify_artifact(root / "fixtures", case["target"]))
-    target = import_target(target_data)
-    pm = preset(case, target, case["preparation_seed"])
-    drop_stages(pm, ("init", "layout"))
-    pm.pre_routing = None
-    pm.post_routing = None
-    router = SabreSwap(
-        target, heuristic=arm, seed=remaining[0], trials=manifest["trial_budgets"]["routing_trials"]
-    )
-    pm.routing = PassManager([SetLayout(Layout.generate_trivial_layout(*circuit.qregs)), router])
-    tap = add_tap(pm, "routing")
-    pipeline = fingerprint(pm)
-    write_json(root / "pipelines" / f"{digest(case['case_id'])[:16]}__{arm}.json", pipeline)
+    context = sample_context(output, case)
     failed = 0
     started = time.monotonic()
     signal.signal(signal.SIGALRM, _sample_timeout)
     with raw_path.open("a", buffering=1) as stream:
-        for seed in remaining:
-            row = {
-                "case_id": case["case_id"],
-                "arm": arm,
-                "arm_id": f"preset_{arm}",
-                "seed": seed,
-                "build_id": manifest["build_id"],
-                "configuration_digest": case["configuration_digests"][arm],
-                "preparation_sha256": case["preparation"]["sha256"],
-                "layout_digest": case["preparation"]["layout_digest"],
-            }
-            before = time.monotonic()
-            try:
-                router.seed = seed
-                tap.captured, tap.error = None, None
-                signal.setitimer(signal.ITIMER_REAL, case["timeout_s"])
-                output_circuit = pm.run(circuit)
-                if tap.error or tap.captured is None:
-                    raise RuntimeError(f"Routing snapshot unavailable: {tap.error}")
-                captured, routed_layout = tap.captured
-                routed = export_circuit(captured)
-                c6 = replay(
-                    operations,
-                    routed["operations"],
-                    routed_layout,
-                    circuit.num_qubits,
-                    circuit.num_qubits,
+        for index, seed in enumerate(remaining):
+            row, pipeline = evaluate_sample(output, case, arm, seed, manifest, context)
+            if index == 0:
+                write_json(
+                    root / "pipelines" / f"{digest(case['case_id'])[:16]}__{arm}.json", pipeline
                 )
-                final = export_circuit(output_circuit)
-                final_layout = export_layout(output_circuit, circuit.num_qubits)
-                checker = StructuralChecker(final["header"], target_data, case["constraint_form"])
-                for operation in final["operations"]:
-                    checker.consume(operation)
-                checker.errors.extend(
-                    layout_errors(final_layout, circuit.num_qubits, output_circuit.num_qubits)
-                )
-                if final_layout == routed_layout:
-                    c6["layout_equality"] = "matched"
-                elif case["optimization_level"] == 3:
-                    c6.update(
-                        layout_equality="skipped",
-                        layout_disagreement={
-                            "reason": "Level-3 optimization may reapply layout",
-                            "full": final_layout,
-                            "routing_snapshot": routed_layout,
-                        },
-                    )
-                else:
-                    c6.update(
-                        status="mismatch",
-                        layout_equality="mismatch",
-                        detail="Output and routing-snapshot layouts differ",
-                    )
-                c0 = checker.result()
-                ok = c6["status"] == c0["status"] == "verified"
-                row.update(
-                    status="ok" if ok else "failed",
-                    D2=c0.get("D2"),
-                    N2=c0.get("N2"),
-                    checks={"C0": c0, "C6": c6},
-                    routed_sha256=digest(routed),
-                    output_sha256=digest(final),
-                )
-                if not ok:
-                    failed += 1
-                    write_json(
-                        root / "failures" / f"{digest([case['case_id'], arm, seed])}.json",
-                        {"row": row, "routed": routed, "final": final},
-                    )
-            except Exception as exc:
-                failed += 1
-                row.update(status="failed", error=f"{type(exc).__name__}: {exc}")
-            finally:
-                signal.setitimer(signal.ITIMER_REAL, 0)
-            row["elapsed_s"] = time.monotonic() - before
+            failed += row["status"] != "ok"
             stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+            if (index + 1) % 10 == 0:
+                print(
+                    f"Samples {case['case_id']}/{arm}: "
+                    f"{len(done) + index + 1}/100; failed={failed}",
+                    flush=True,
+                )
     return {
         "case_id": case["case_id"],
         "arm": arm,
         "cached": len(done),
         "new": len(remaining),
         "failed": failed,
-        "seconds": time.monotonic() - started,
+        "elapsed_s": time.monotonic() - started,
     }
 
 
-def collect(output, source, profile, master_seed=20261103, trials=20, workers=6):
+def collect(
+    output, source, profile, master_seed=20261103, trials=20, workers=6, execution_mode="end_to_end"
+):
     for key, value in THREAD_ENV.items():
         os.environ[key] = value
-    manifest = freeze(output, source, profile, master_seed, trials, workers)
+    manifest = freeze(output, source, profile, master_seed, trials, workers, execution_mode)
     rows = load_observations(output, manifest)
     archive_failures(output)
     print(

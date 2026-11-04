@@ -10,9 +10,8 @@ from pathlib import Path
 
 from .collect import (
     ARMS,
-    configure_imports,
     digest,
-    drop_stages,
+    evaluate_sample,
     file_hash,
     harness_inventory,
     validate_session,
@@ -27,6 +26,7 @@ def audit(output: Path, case_id: str | None = None):
     validate_session(output, manifest)
     if harness_inventory() != manifest["harness"]["collection_files"]:
         raise ValueError("Collection harness changed; use the frozen harness for this audit")
+    execution_mode = manifest.get("execution_mode", "fixed_layout")
     case = next(c for c in manifest["cases"] if case_id is None or c["case_id"] == case_id)
     stored = {}
     for arm in ARMS:
@@ -46,77 +46,32 @@ def audit(output: Path, case_id: str | None = None):
             raise ValueError(f"Cannot audit incompatible or failed observation for {arm}")
         stored[arm] = row
 
-    configure_imports(output)
-    from qiskit.transpiler import Layout, PassManager
-    from qiskit.transpiler.passes import SabreSwap, SetLayout
-
-    from qtb.canonical import read_circuit, read_json, verify_artifact
-    from qtb.metrics import StructuralChecker, layout_errors
-    from qtb.metrics.replay import replay
-    from qtb_worker.adapter import (
-        add_tap,
-        export_circuit,
-        export_layout,
-        import_circuit,
-        import_target,
-        preset,
-    )
-
-    header, operations = read_circuit(verify_artifact(output, case["preparation"], circuit=True))
-    target_data = read_json(verify_artifact(output / "fixtures", case["target"]))
     results = []
     for arm, original in stored.items():
         started = time.monotonic()
-        circuit = import_circuit({"header": header, "operations": operations})
-        target = import_target(target_data)
-        pm = preset(case, target, case["preparation_seed"])
-        drop_stages(pm, ("init", "layout"))
-        pm.pre_routing = None
-        pm.post_routing = None
-        pm.routing = PassManager(
-            [
-                SetLayout(Layout.generate_trivial_layout(*circuit.qregs)),
-                SabreSwap(
-                    target,
-                    heuristic=arm,
-                    seed=original["seed"],
-                    trials=manifest["trial_budgets"]["routing_trials"],
-                ),
-            ]
+        row, _pipeline = evaluate_sample(output, case, arm, original["seed"], manifest)
+        fields = ["D2", "N2", "routed_sha256", "output_sha256"]
+        fields.extend(
+            field for field in ("init_sha256", "final_layout_digest") if field in original
         )
-        tap = add_tap(pm, "routing")
-        final_circuit = pm.run(circuit)
-        if tap.error or tap.captured is None:
-            raise RuntimeError(f"Audit routing snapshot unavailable: {tap.error}")
-        routed_circuit, routed_layout = tap.captured
-        routed = export_circuit(routed_circuit)
-        final = export_circuit(final_circuit)
-        final_layout = export_layout(final_circuit, circuit.num_qubits)
-        c6 = replay(
-            operations, routed["operations"], routed_layout, circuit.num_qubits, circuit.num_qubits
-        )
-        if final_layout != routed_layout and case["optimization_level"] != 3:
-            c6.update(status="mismatch", detail="Final and routing layouts differ")
-        checker = StructuralChecker(final["header"], target_data, case["constraint_form"])
-        for operation in final["operations"]:
-            checker.consume(operation)
-        checker.errors.extend(
-            layout_errors(final_layout, circuit.num_qubits, final_circuit.num_qubits)
-        )
-        c0 = checker.result()
-        repeated = {
-            "D2": c0.get("D2"),
-            "N2": c0.get("N2"),
-            "routed_sha256": digest(routed),
-            "output_sha256": digest(final),
-        }
+        # Version 1 fixed-layout rows stored the preparation layout under this field.
+        if "layout_digest" in original and (
+            execution_mode == "end_to_end"
+            or manifest.get("format") == "qtb-independent-distributions/2"
+        ):
+            fields.append("layout_digest")
+        repeated = {field: row.get(field) for field in fields}
+        checks = row.get("checks", {})
+        c0, c6 = (checks.get(key, {"status": "unverified"}) for key in ("C0", "C6"))
         matches = {field: value == original[field] for field, value in repeated.items()}
         result = {
             "case_id": case["case_id"],
             "arm": arm,
             "seed": original["seed"],
             "status": "verified"
-            if all(matches.values()) and c0["status"] == c6["status"] == "verified"
+            if row["status"] == "ok"
+            and all(matches.values())
+            and c0["status"] == c6["status"] == "verified"
             else "mismatch",
             "matches": matches,
             "original": {field: original[field] for field in repeated},
@@ -124,6 +79,8 @@ def audit(output: Path, case_id: str | None = None):
             "checks": {"C0": c0, "C6": c6},
             "elapsed_s": time.monotonic() - started,
         }
+        if row.get("error"):
+            result["error"] = row["error"]
         results.append(result)
         print(
             json.dumps(
@@ -137,7 +94,8 @@ def audit(output: Path, case_id: str | None = None):
             flush=True,
         )
     result = {
-        "format": "qtb-distributions-reproducibility-audit/1",
+        "format": "qtb-distributions-reproducibility-audit/2",
+        "execution_mode": execution_mode,
         "created_at": dt.datetime.now(dt.UTC).isoformat(),
         "session_id": manifest["session_id"],
         "build_id": manifest["build_id"],

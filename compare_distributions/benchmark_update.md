@@ -1,6 +1,53 @@
 # Benchmark design: wait_time versus decay, lookahead, and basic
 
-Status: proposed design; this document does not implement the harness or rerun benchmarks.
+Status: implemented as `compare_distributions`. The end-to-end amendment below is
+the current default collection protocol. The archived design following it describes
+the earlier fixed-layout experiment; its requirements to freeze layouts and sample
+routing alone apply only to `--mode fixed_layout`.
+
+## Current protocol amendment: end-to-end layout and routing
+
+Updated on 2026-11-03. New `--mode end_to_end` sessions retain the same 61 scored
+cases, frozen weights, four arms, 100 independently sampled outer seeds per
+case/arm, three wait-time-first comparisons, descriptive statistics, and
+confidence-interval calculations. They change the experimental pipeline:
+
+1. Freeze original logical circuits, targets, optimization settings, native metric
+   definitions, seed lists, and 20 layout/20 swap trial budgets before collection.
+2. For every case, arm, and seed, run the full preset pipeline from the original
+   logical circuit. Each arm's complete heuristic is passed explicitly to
+   `SabreLayout`, including its integrated routing, and to any fallback `SabreSwap`.
+   Keep the preset's routing conditions and downstream translation/optimization.
+3. Allow layouts to differ between arms and seeds. A layout is an output of the
+   experiment, not a shared decay-selected input. There is no shared preparation
+   seed. The outer seed controls transpilation, including SABRE layout and routing.
+4. Record per-run initialization and layout hashes, final native D2/N2, structural
+   legality, and replay evidence from initialization through routing. Keep the
+   existing handling of failures and missing observations.
+5. Record `execution_mode=end_to_end` in the frozen manifest and all report
+   metadata. Collect all 24,400 observations in a new output directory; observations
+   from the earlier fixed-layout study are not eligible for reuse.
+
+The pinned candidate must expose `SabreLayout(heuristic=...)` as well as the
+existing native wait-time component. Its default remains unchanged: wait-time
+scoring is enabled only by the benchmark's explicit arm configuration. All four
+arms use their own matching components throughout layout and routing.
+
+Only wait time versus decay isolates the added wait-time term. In this mode it
+measures that term's effect across the layout-and-routing pipeline. Uncertainty
+is conditional on the fixed circuit panel and settings while including variability
+in layout selection and routing. It does not condition on a single chosen layout.
+This is a different estimand from the archived routing-only experiment; results
+must carry the execution mode and must not be pooled across modes.
+
+The existing seed-bootstrap calculation is retained as exploratory sensitivity
+analysis. It was introduced after inspecting the original fixed-layout outcomes;
+it does not replace the frozen analytic diagnostic statuses in either mode.
+
+See [README.md](README.md) for current commands. The examples and figures below
+remain the original fixed-layout design and are not new measurements.
+
+## Archived fixed-layout design
 
 Updated on 2026-11-03. The report evaluates exactly these three ordered comparisons:
 

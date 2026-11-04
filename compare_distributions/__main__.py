@@ -17,6 +17,12 @@ def main():
     prepare.add_argument("--master-seed", type=int, default=20261103)
     prepare.add_argument("--trials", type=int, default=20)
     prepare.add_argument("--workers", type=int, default=6)
+    prepare.add_argument(
+        "--mode",
+        choices=("end_to_end", "fixed_layout"),
+        default="end_to_end",
+        help="Apply each heuristic during layout and routing, or compare routing on a fixed layout",
+    )
     report = stages.add_parser("report", help="Calculate statistics, export plots and final report")
     report.add_argument("--output", type=Path, default=Path("compare_distributions_results"))
     args = parser.parse_args()
@@ -26,7 +32,13 @@ def main():
         if args.trials < 1 or args.workers < 1:
             parser.error("trials and workers must be positive")
         status = collect(
-            args.output, args.source, args.profile, args.master_seed, args.trials, args.workers
+            args.output,
+            args.source,
+            args.profile,
+            args.master_seed,
+            args.trials,
+            args.workers,
+            execution_mode=args.mode,
         )
         return 0 if status["status"] == "complete" else 2
     from .collect import load_observations, validate_session

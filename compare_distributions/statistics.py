@@ -25,6 +25,10 @@ DEFAULT_ANALYSIS_SETTINGS = {
 }
 SAMPLING_PROTOCOL = "independent case/arm seed streams; no matching across observations"
 CONDITIONING_SET = "frozen cases, inputs, targets, preparation, layouts, presets and trial budgets"
+END_TO_END_CONDITIONING_SET = (
+    "frozen cases, original inputs, targets, presets, optimization settings and trial budgets; "
+    "layout and routing vary with independently sampled transpilation seeds"
+)
 PRIMARY_FAMILY = [f"wait_time_vs_{arm}/{metric}" for arm in COMPARATORS for metric in METRICS]
 BOOTSTRAP_REPLICATES = 20_000
 BOOTSTRAP_DEFAULT_SEED = 20261103
@@ -57,7 +61,7 @@ def _validate_manifest(manifest: dict) -> list[dict]:
                     f"Expected exactly 100 unique frozen seeds: {case['case_id']}/{arm}"
                 )
             if any(not isinstance(seed, int) or isinstance(seed, bool) for seed in seeds):
-                raise ValueError("Routing seed identities must be integers")
+                raise ValueError("Seed identities must be integers")
     return cases
 
 
@@ -100,7 +104,7 @@ def _interval(
         "critical_value": critical,
         "degrees_of_freedom": 99 if method == "student_t_mean" else None,
         "sampling_protocol": SAMPLING_PROTOCOL,
-        "conditioning_set": CONDITIONING_SET,
+        "conditioning_set": context.get("conditioning_set", CONDITIONING_SET),
     }
     if status == "reported":
         if method == "student_t_mean":
@@ -232,6 +236,7 @@ def _case_contrast(case: dict, metric: str, comparator: str, arms: dict) -> dict
         "numerator": "wait_time",
         "comparator": comparator,
         "metric": metric,
+        "conditioning_set": first["mean_ci"]["conditioning_set"],
     }
     result = {**context, "status": "complete" if complete else "incomplete"}
     for statistic in ("mean", "median", "p90"):
@@ -291,6 +296,7 @@ def _aggregate(scope: str, scope_id: str, cases: list[dict], contrasts: list[dic
         "comparator": contrasts[0]["comparator"],
         "metric": contrasts[0]["metric"],
         "case_count": len(cases),
+        "conditioning_set": contrasts[0]["mean"]["ci"]["conditioning_set"],
     }
     complete = all(row["status"] == "complete" for row in contrasts)
     result = {**context, "status": "complete" if complete else "incomplete"}
@@ -404,6 +410,7 @@ def seed_bootstrap(
     *,
     replicates: int = BOOTSTRAP_REPLICATES,
     seed: int = BOOTSTRAP_DEFAULT_SEED,
+    execution_mode: str = "fixed_layout",
 ) -> dict:
     """Sensitivity intervals for the six panel mean effects that skip the frozen screens.
 
@@ -473,7 +480,11 @@ def seed_bootstrap(
         "preregistered": False,
         "replicates": replicates,
         "rng_seed": seed,
-        "resampling_unit": "routing seed within each case/arm (cases and weights fixed)",
+        "resampling_unit": (
+            "transpilation seed within each case/arm (cases and weights fixed; layouts sampled)"
+            if execution_mode == "end_to_end"
+            else "routing seed within each case/arm (cases and weights fixed)"
+        ),
         "statistic": "weighted sum of case log arithmetic-mean ratios (panel mean effect)",
         "applies_diagnostic_screens": False,
         "endpoints": endpoints,
@@ -488,6 +499,12 @@ def analyze(manifest: dict, observations: list[dict]) -> dict:
     mark their affected comparisons incomplete, without excluding any case weight.
     """
     cases = _validate_manifest(manifest)
+    execution_mode = manifest.get("execution_mode", "fixed_layout")
+    if execution_mode not in ("fixed_layout", "end_to_end"):
+        raise ValueError(f"Unknown execution mode: {execution_mode}")
+    conditioning_set = (
+        END_TO_END_CONDITIONING_SET if execution_mode == "end_to_end" else CONDITIONING_SET
+    )
     settings = {**DEFAULT_ANALYSIS_SETTINGS, **manifest.get("analysis_settings", {})}
     for key in DEFAULT_ANALYSIS_SETTINGS:
         if (
@@ -558,6 +575,7 @@ def analyze(manifest: dict, observations: list[dict]) -> dict:
                     "arm": arm,
                     "arm_id": f"preset_{arm}",
                     "metric": metric,
+                    "conditioning_set": conditioning_set,
                 }
                 summary = _summary(values, context, base_complete and not invalid, settings)
                 summaries.append(summary)
@@ -626,10 +644,11 @@ def analyze(manifest: dict, observations: list[dict]) -> dict:
             "metrics": list(METRICS),
             "case_count": len(cases),
             "seeds_per_case_arm": 100,
+            "execution_mode": execution_mode,
             "analysis_settings": settings,
             "primary_endpoint_family": PRIMARY_FAMILY,
             "sampling_protocol": SAMPLING_PROTOCOL,
-            "conditioning_set": CONDITIONING_SET,
+            "conditioning_set": conditioning_set,
             "quantile_method": "empirical nearest rank: x_(ceil(n*p)); median is x_(50) at n=100",
             "variance_ddof": 1,
             "mean_aggregation": "weighted geometric mean of per-case arithmetic-mean ratios",
@@ -656,6 +675,8 @@ def analyze(manifest: dict, observations: list[dict]) -> dict:
         "spread_counts": spread_counts,
         "diagnostics": diagnostics,
         "sensitivity": {
-            "seed_bootstrap": seed_bootstrap(cases, values_map, panel, seed=bootstrap_seed)
+            "seed_bootstrap": seed_bootstrap(
+                cases, values_map, panel, seed=bootstrap_seed, execution_mode=execution_mode
+            )
         },
     }

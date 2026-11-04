@@ -67,7 +67,11 @@ See the [documentation index](docs/README.md) and [manual workflow](docs/workflo
 For the four-preset `wait_time` distribution study, use the separate
 [two-stage comparison workflow](compare_distributions/README.md): `prepare` freezes and
 collects the raw data; `report` generates statistics, graphs, and the final report.
-Its default output is `./compare_distributions_results`, and it does not issue a two-build verdict.
+Collection defaults to end-to-end transpilation: every heuristic controls its own
+SABRE layout search and routing. Use a fresh output directory (for example
+`./compare_distributions_results_end_to_end`) to preserve earlier fixed-layout runs;
+`--mode fixed_layout` retains that conditional routing experiment. The command's default
+output is `./compare_distributions_results`, and it does not issue a two-build verdict.
 
 ## Development
 
