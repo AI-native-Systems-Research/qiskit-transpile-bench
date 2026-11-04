@@ -1,3 +1,7 @@
+@jakelishman, below are benchmark comparisons, statistical summaries, and uncertainty estimates to help address your request about including `decay` in the preset and choosing the default `wait_time` weighting, including the statistics requested in [#17394](https://github.com/Qiskit/qiskit/issues/17394).
+
+I also added [f055025](https://github.com/Qiskit/qiskit/commit/f055025525f447a1604144992fb6af9049be162b) so that `wait_time` can guide layout search as well as routing. 
+
 **Wait-time layout and routing benchmark**
 
 All changes are `wait_time` relative to the comparator; negative means lower.
