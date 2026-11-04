@@ -95,6 +95,27 @@ geometric mean. Relative-spread effects average case differences in SD divided
 by each arm's own mean and IQR divided by its own median, in percentage points.
 There is no seed pairing or four-arm normalization denominator.
 
+The report includes `figures/configuration_scatter_D2.png` and
+`figures/configuration_scatter_N2.png` (also SVG/PDF). These overlay `wait_time`,
+`decay`, `lookahead`, and `basic` with distinct colors and markers, one point per
+case and configuration. Each point uses the configuration's arithmetic mean over
+its independent seeds on the y-axis and the same case's decay mean on the x-axis.
+Both axes are logarithmic with matching limits and a dashed `y = x` line; points
+below the line have lower depth/count than decay. To use a different reference:
+
+```bash
+uv run python -m compare_distributions report \
+  --output ./output/compare_distributions_end_to_end \
+  --scatter-reference basic
+```
+
+`--scatter-reference` accepts any of the four configurations and defaults to
+`decay`. These are descriptive raw means without case weighting or confidence
+intervals. Incomplete, nonfinite, or nonpositive mean pairs are omitted from the
+log plots, with counts in the legends and per-case reasons in
+`plot_data.json` under `configuration_scatter`. No epsilon is added to zeros.
+All plotted coordinates and axis limits are exported there for reproduction.
+
 The report also overlays all three wait-time comparison histograms in
 `figures/spread_histograms.png` (with SVG/PDF exports). Four panels show per-case
 CV and IQR-to-median differences for D2 and N2, in percentage points. Comparisons
@@ -139,6 +160,6 @@ statistical estimates without issuing the legacy two-build acceptance verdict.
 ## Validate the implementation
 
 ```bash
-uv run pytest tests/test_compare_distributions_collect.py tests/test_compare_distributions_statistics.py
+uv run pytest tests/test_compare_distributions_*.py
 uv run ruff check compare_distributions tests/test_compare_distributions_*.py
 ```

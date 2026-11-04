@@ -23,7 +23,7 @@ COMPARATORS = ("decay", "lookahead", "basic")
 ARMS = ("wait_time", *COMPARATORS)
 METRICS = ("D2", "N2")
 COLORS = {"wait_time": "#0072B2", "decay": "#D55E00", "lookahead": "#009E73", "basic": "#CC79A7"}
-MARKERS = {"decay": "o", "lookahead": "s", "basic": "D"}
+MARKERS = {"wait_time": "^", "decay": "o", "lookahead": "s", "basic": "D"}
 
 
 def _json(path: Path, value: Any) -> None:
@@ -350,6 +350,120 @@ class Figures:
             "ratios are aggregated using frozen weights.",
             "main",
         )
+
+    def configuration_scatter(
+        self, summaries: list[dict], cases: list[dict], reference_arm: str = "decay"
+    ) -> list[dict]:
+        """Plot four arm means against the same case's reference mean, without pairing seeds."""
+        if reference_arm not in ARMS:
+            raise ValueError(f"Unknown scatter reference arm: {reference_arm}")
+        lookup = {(row["case_id"], row["arm"], row["metric"]): row for row in summaries}
+
+        def status(summary: dict | None) -> str:
+            if summary is None:
+                return "missing"
+            if summary.get("status") != "complete":
+                return "incomplete"
+            if not _finite(summary.get("mean")):
+                return "non_finite_mean"
+            if summary["mean"] <= 0:
+                return "nonpositive_mean"
+            return "reported"
+
+        panels = []
+        for metric in METRICS:
+            series = []
+            for arm in ARMS:
+                points, unavailable = [], []
+                for case in cases:
+                    case_id = case["case_id"]
+                    reference = lookup.get((case_id, reference_arm, metric))
+                    summary = lookup.get((case_id, arm, metric))
+                    reference_status, arm_status = status(reference), status(summary)
+                    if reference_status == arm_status == "reported":
+                        points.append(
+                            {"case_id": case_id, "x": reference["mean"], "y": summary["mean"]}
+                        )
+                    else:
+                        unavailable.append(
+                            {
+                                "case_id": case_id,
+                                "reference_status": reference_status,
+                                "arm_status": arm_status,
+                            }
+                        )
+                series.append({"arm": arm, "points": points, "unavailable_cases": unavailable})
+
+            values = [
+                point[coordinate]
+                for arm_series in series
+                for point in arm_series["points"]
+                for coordinate in ("x", "y")
+            ]
+            limits = [min(values) / 1.25, max(values) * 1.25] if values else [1, 10]
+            figure, axis = self.plt.subplots(figsize=(9, 9), constrained_layout=True)
+            axis.set_xscale("log")
+            axis.set_yscale("log")
+            axis.set_xlim(limits)
+            axis.set_ylim(limits)
+            axis.set_aspect("equal", adjustable="box")
+            for arm_series in series:
+                arm = arm_series["arm"]
+                points = arm_series["points"]
+                label = f"{arm} (n={len(points)})"
+                if arm_series["unavailable_cases"]:
+                    label += f", {len(arm_series['unavailable_cases'])} omitted"
+                axis.scatter(
+                    [point["x"] for point in points],
+                    [point["y"] for point in points],
+                    color=COLORS[arm],
+                    marker=MARKERS[arm],
+                    s=65,
+                    alpha=0.7,
+                    edgecolors="white",
+                    linewidths=0.5,
+                    label=label,
+                    zorder=4 if arm == "wait_time" else 2 if arm == reference_arm else 3,
+                )
+            axis.plot(limits, limits, "--", color="#64748B", linewidth=1.4, label="y = x")
+            if not values:
+                axis.text(
+                    0.5, 0.5, "No complete, positive case means available",
+                    ha="center", va="center", transform=axis.transAxes,
+                )
+            metric_label = "two-qubit depth" if metric == "D2" else "two-qubit gate count"
+            axis.set_xlabel(f"Mean {metric_label} ({reference_arm})")
+            axis.set_ylabel(f"Mean {metric_label} (all configurations)")
+            axis.set_title(f"{metric} · arithmetic mean across seeds", fontsize=12, pad=12)
+            axis.legend(title="Configuration", loc="upper left", frameon=False)
+            axis.grid(which="major", color="#CBD5E1", linestyle=":", linewidth=0.8)
+            axis.set_axisbelow(True)
+            figure.suptitle(f"SABRE configurations: {len(cases)} benchmark cases", fontsize=15)
+            self.save(
+                figure,
+                f"configuration_scatter_{metric}",
+                f"All four configurations: per-case arithmetic mean {metric} versus "
+                f"{reference_arm} on matching logarithmic axes. Each point represents one "
+                "case and configuration, averaging its own independent seed observations. "
+                f"Below y = x means lower {metric} than {reference_arm}; the reference "
+                "configuration lies on the diagonal. These are descriptive raw means, "
+                "without case weighting or confidence intervals. Only complete, finite, "
+                "positive pairs are plotted; omitted cases and reasons are in plot_data.json "
+                "and omission counts are in the legend. No epsilon is added for zero means.",
+                "main",
+            )
+            panels.append(
+                {
+                    "metric": metric,
+                    "statistic": "mean",
+                    "reference_arm": reference_arm,
+                    "x_scale": "log",
+                    "y_scale": "log",
+                    "axis_limits": limits,
+                    "series": series,
+                }
+            )
+        return panels
 
     def spread_histograms(self, contrasts: list[dict], cases: list[dict]) -> list[dict]:
         """Overlay all three per-case spread comparisons using shared bins in each panel."""
@@ -951,6 +1065,7 @@ def _report(
     figure_entries: list[dict],
     validation: dict | None = None,
     output_dir: Path | None = None,
+    scatter_reference: str = "decay",
 ) -> str:
     panel = [row for row in analysis["aggregates"] if row["scope"] == "panel"]
     lookup = {(row["metric"], row["comparator"]): row for row in panel}
@@ -994,12 +1109,29 @@ def _report(
         "The three questions are whether wait_time changes average/typical D2 and N2, "
         "seed variability, and the P90 upper tail relative to decay, lookahead, and basic. "
         "D2 is final native two-qubit depth; N2 is final native two-qubit count. "
-        "Every effect below has wait_time first: negative changes indicate a lower statistic.",
+        "Ratio and difference effects have wait_time first: negative changes indicate a "
+        "lower statistic. The four-configuration scatter plots show raw case means.",
         "",
         f"Correctness evidence: C0 native-gate/topology legality verified for {checks['C0']:,} "
         f"observations; C6 routing replay verified for {checks['C6']:,}. "
         "Observations failing either check are excluded from valid measurements and leave the "
         "affected frozen comparisons incomplete.",
+        "",
+    ]
+    lines += [
+        "## Four-configuration comparison",
+        "",
+        "Each point is one case's arithmetic mean across its independent seeds. All four "
+        f"configurations share the same `{scatter_reference}` case mean on the x-axis; "
+        "both axes are logarithmic with identical limits. Points below `y = x` have lower "
+        f"depth or count than `{scatter_reference}`; the reference itself lies on the diagonal. "
+        "These descriptive plots use raw means with no case weighting, seed matching, or "
+        "confidence intervals. Incomplete or nonpositive pairs are omitted from the log plot "
+        "and recorded with reasons in `plot_data.json`; legends show omission counts.",
+        "",
+        "![Four configurations: two-qubit depth](figures/configuration_scatter_D2.png)",
+        "",
+        "![Four configurations: two-qubit count](figures/configuration_scatter_N2.png)",
         "",
     ]
     for metric in METRICS:
@@ -1293,7 +1425,8 @@ def _report(
         ".venv/bin/python -m compare_distributions prepare "
         "--source /Users/ophir/PycharmProjects/qiskit-evolved "
         f"--mode {execution_mode} --output {output_arg}",
-        f".venv/bin/python -m compare_distributions report --output {output_arg}",
+        f".venv/bin/python -m compare_distributions report --output {output_arg} "
+        f"--scatter-reference {scatter_reference}",
         "```",
         "",
         "[Artifact schema](artifacts.md) documents the raw records, CSV tables, complete "
@@ -1305,9 +1438,12 @@ def _report(
 
 
 def generate_report(
-    output_dir: Path, manifest: dict, observations: list[dict], analysis: dict
+    output_dir: Path, manifest: dict, observations: list[dict], analysis: dict,
+    *, scatter_reference: str = "decay",
 ) -> dict:
     """Write complete supporting data and render report figures without rerunning collection."""
+    if scatter_reference not in ARMS:
+        raise ValueError(f"Unknown scatter reference arm: {scatter_reference}")
     output_dir = Path(output_dir)
     execution_mode = manifest.get("execution_mode", "fixed_layout")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1382,6 +1518,9 @@ def generate_report(
         figures.aggregate_grid(panel, metric, len(manifest["cases"]))
     figures.primary_forest(panel, len(manifest["cases"]))
     figures.tail_ratios(panel, len(manifest["cases"]))
+    configuration_scatter = figures.configuration_scatter(
+        analysis["arm_summaries"], manifest["cases"], reference_arm=scatter_reference
+    )
     spread_histograms = figures.spread_histograms(analysis["case_contrasts"], manifest["cases"])
     _json(
         output_dir / "plot_data.json",
@@ -1390,6 +1529,7 @@ def generate_report(
             "comparison_order": [f"wait_time_vs_{comparator}" for comparator in COMPARATORS],
             "aggregates": analysis["aggregates"],
             "case_contrasts": analysis["case_contrasts"],
+            "configuration_scatter": configuration_scatter,
             "spread_histograms": spread_histograms,
             "selected_distributions": selected,
             "material_regressions": regressions,
@@ -1413,6 +1553,7 @@ def generate_report(
             figures.entries,
             validation,
             output_dir=output_dir,
+            scatter_reference=scatter_reference,
         )
     )
     (output_dir / "artifacts.md").write_text(
@@ -1459,7 +1600,10 @@ def generate_report(
         "selection threshold. `plot_data.json` contains plotted effect rows, case order, selected "
         "distribution reasons, and a reference to the raw data. Its `spread_histograms` contains "
         "shared bin edges and per-comparison case IDs, values, unweighted bin counts, and "
-        "unavailable case IDs for each metric/spread panel. `figures/index.md` links every "
+        "unavailable case IDs for each metric/spread panel. Its `configuration_scatter` contains "
+        "the reference arm, statistic, log-axis limits, and four series of per-case x/y means "
+        "for D2/N2, plus unavailable cases and their reference/arm statuses. "
+        "`figures/index.md` links every "
         "standalone SVG/PDF figure and PNG preview. `report_metadata.json` records all figure "
         "captions and selected cases, analysis source hashes, and dependency versions. "
         "`analysis_source/` preserves the exact analysis and reporting implementation, separate "
@@ -1469,6 +1613,7 @@ def generate_report(
         "format": "qtb-distribution-report/1",
         "execution_mode": execution_mode,
         "session_id": manifest.get("session_id"),
+        "scatter_reference": scatter_reference,
         "analysis_source_sha256": source_hashes,
         "python": sys.version,
         "dependencies": {
