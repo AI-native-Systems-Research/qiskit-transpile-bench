@@ -155,14 +155,16 @@ def _plot(output: Path, manifest: dict, data: dict, plt) -> None:
     points = data["points"]
     zeros = [point for point in points if point["x"] == 0]
     positive = [point for point in points if point["x"] > 0]
+    dense_grid = len(points) > 12
+    figure_size = (12, 5.8) if dense_grid else (10, 5.3)
     if zeros and positive:
         figure, axes = plt.subplots(
-            1, 2, figsize=(10, 5.3), sharey=True, gridspec_kw={"width_ratios": [1, 5]}
+            1, 2, figsize=figure_size, sharey=True, gridspec_kw={"width_ratios": [1, 5]}
         )
         zero_axis, positive_axis = axes
         positive_axis.tick_params(axis="y", left=False)
     else:
-        figure, axis = plt.subplots(figsize=(10, 5.3))
+        figure, axis = plt.subplots(figsize=figure_size)
         axes = [axis]
         zero_axis, positive_axis = (axis, None) if zeros else (None, axis)
     by_arm = {point["arm"]: point for point in points}
@@ -197,8 +199,9 @@ def _plot(output: Path, manifest: dict, data: dict, plt) -> None:
             positive_axis.set_xticks(
                 [point["x"] for point in positive],
                 labels=[_weight_label(point["x"]) for point in positive],
-                rotation=45,
-                ha="right",
+                rotation=90 if dense_grid else 45,
+                ha="center" if dense_grid else "right",
+                fontsize=9 if dense_grid else 10,
             )
             positive_axis.minorticks_off()
             for first, second in data["positive_line_segments"]:
@@ -355,6 +358,42 @@ def _recommendation(manifest: dict, panel: dict) -> str:
     return text
 
 
+def _extension_lines(manifest: dict, analysis: dict) -> list[str]:
+    extension = manifest.get("extension")
+    if not extension:
+        return []
+    labels = ", ".join(
+        f"`{_weight_label(manifest['arm_configs'][arm]['weight'])}`"
+        for arm in extension["added_arms"]
+    )
+    endpoints = analysis["meta"].get("primary_endpoints", 2 * (len(manifest["arms"]) - 1))
+    return [
+        "## Extended sweep and data reuse",
+        "",
+        "The grid was expanded after inspecting the original results. "
+        f"Added coefficients: {labels}. Only these coefficients were scheduled for new "
+        f"collection, with {extension['new_expected_observations']:,} expected observations. "
+        f"The {extension['reused_observations']:,} inherited observations, including decay, "
+        "are reused once each in the combined dataset; existing arms were not rerun.",
+        "",
+        "The Qiskit build, logical inputs, targets, case weights, seed and trial budgets, "
+        "and execution mode remain frozen from the parent session. All coefficients share "
+        "the same decay observations as their sole baseline.",
+        "",
+        f"The expanded {endpoints}-endpoint Bonferroni adjustment is descriptive: it does "
+        "not account for the adaptive selection of additional weights after inspecting results. "
+        "This expanded sweep is exploratory and does not establish confirmatory superiority "
+        "or an optimal weight.",
+        "",
+        f"Parent session: `{extension['parent_session_id']}`. "
+        f"Parent manifest SHA-256: `{extension['parent_manifest_sha256']}`. "
+        f"Parent output: `{extension['parent_output']}`. "
+        "The extension provenance is recorded in [manifest.json](manifest.json) and "
+        "[plot_data.json](plot_data.json).",
+        "",
+    ]
+
+
 def _report(manifest: dict, observations: list[dict], analysis: dict, coverage: list[dict]) -> str:
     complete = analysis["completeness"]
     panel = {
@@ -387,6 +426,7 @@ def _report(manifest: dict, observations: list[dict], analysis: dict, coverage: 
         f"Valid observations: {complete.get('valid', 0):,}/{complete.get('expected', 0):,}; "
         f"failed: {complete.get('failed', 0):,}; missing: {complete.get('missing', 0):,}.",
         "",
+        *_extension_lines(manifest, analysis),
         "## Configuration",
         "",
         "Basic weight is 1 (constant scaling); lookahead is 0.5 / physical target width; "
@@ -601,7 +641,10 @@ def generate_report(output: str | Path, manifest: dict, observations: list[dict]
             _plot(root, manifest, curve, plt)
     coverage = _coverage(manifest, observations)
     _json(root / "statistics.json", analysis)
-    _json(root / "plot_data.json", {"format": "qtb-wait-time-ablation-plots/1", "curves": data})
+    plot_data = {"format": "qtb-wait-time-ablation-plots/1", "curves": data}
+    if manifest.get("extension"):
+        plot_data["extension"] = manifest["extension"]
+    _json(root / "plot_data.json", plot_data)
     tables = {
         "raw_observations": observations,
         "arm_summaries": analysis["arm_summaries"],

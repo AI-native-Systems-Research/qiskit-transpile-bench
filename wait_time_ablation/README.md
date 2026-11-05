@@ -18,45 +18,124 @@ still implements the old strict tie-break API. Rebuild the weighted source for
 the Python interpreter running collection; updating Python or Rust source alone
 does not update the compiled extension.
 
-## Collect and report
+## Collect and report all weights
+
+The full-sweep entry point collects all **17 weights** and then generates the
+report and D2/N2 graphs. Use a new output directory for a fresh collection:
 
 ```bash
-uv run python -m wait_time_ablation prepare \
+.venv/bin/python -m wait_time_ablation.full_sweep \
   --source /Users/ophir/PycharmProjects/qiskit-evolved \
   --mode end_to_end \
-  --output output/wait_time_weight_ablation_end_to_end
-
-uv run python -m wait_time_ablation report \
-  --output output/wait_time_weight_ablation_end_to_end
+  --output output/wait_time_weight_ablation_all_weights
 ```
 
-Defaults are the confirm profile's 61 scored exact-100 cases, 100 independent
-seeds per case/arm, 20 layout trials, 20 layout-swap trials, 20 routing trials,
-master seed `20261105`, and six workers with one native thread per worker.
-The default grid is:
+This command pins the confirm profile's 100 independent seeds per case/arm,
+20 layout trials, 20 layout-swap trials, 20 routing trials, master seed
+`20261105`, 20,000 bootstrap replicates, and bootstrap seed `20261105`.
+It defaults to the confirm profile and six workers with one native thread per
+worker. The full grid is:
 
 ```text
-0, 1e-8, 1e-7, 1e-6, 3e-6, 1e-5, 2.2e-5, 5e-5, 1e-4, 3e-4, 1e-3
+0, 1e-8, 1e-7, 1e-6, 3e-6, 1e-5, 2.2e-5, 5e-5, 1e-4, 3e-4, 1e-3, 0.0025, 0.05, 0.1, 0.25, 0.5, 0.75
 ```
 
-Including the shared decay baseline, this is **73,200 observations**. The grid
-covers weak through strong penalties and includes the current preset coefficient
+On the completed study's 61 cases, including the shared decay baseline, this is
+**109,800 observations**: 61 cases × 100 seeds × 18 arms. The grid covers weak
+through strong penalties and includes the current preset coefficient
 `2.2e-5`. It is exploratory; the best coefficient is not known in advance. Decay
 remains enabled in every weight arm. Weight zero exercises wait-time bookkeeping
 without adding a scoring penalty; independent seed samples mean its measured
 curve point need not equal zero exactly.
+
+`full_sweep.py` stores the complete grid explicitly. The lower-level `prepare`
+command retains its original 11-weight default so the frozen collection-code
+checksums of the existing sessions remain compatible. Use `full_sweep` for the
+complete grid, or pass an explicit `prepare --weights` list for a custom study.
+Repeat the same full-sweep command to resume a matching new collection; successful
+samples are reused and the report runs after collection completes.
 
 End-to-end collection starts from the original logical circuit and applies the
 same weight during SABRE layout search, integrated routing, and any fallback
 routing. Other preset settings and downstream optimization stay fixed. Cases
 where VF2 bypasses SABRE remain in the panel and execution coverage is reported.
 
-For routing conditional on a fixed decay-selected layout, run both commands with
-a different output directory and `prepare --mode fixed_layout`. This secondary
+For routing conditional on a fixed decay-selected layout, run the command with
+a different output directory and `full_sweep --mode fixed_layout`. This secondary
 study has its own baseline and report; never combine its observations with the
 end-to-end study. It does not measure layout improvements.
 
+## Reconstruct the completed results
+
+The completed session contains all 17 weights and 109,800 verified observations.
+Regenerate its report, graphs, statistics, and tables directly from saved raw
+data, without compiling any circuits:
+
+```bash
+.venv/bin/python -m wait_time_ablation report \
+  --output output/wait_time_weight_ablation_end_to_end_extended_0025
+```
+
+This uses the complete frozen 61-case panel for every weight. It needs no
+temporary-graph scripts and does not recompute old weights on an incomplete
+case subset. The graph coordinates and confidence intervals come from the
+saved observations and frozen analysis settings.
+
+Keep the **entire session directory**, including `manifest.json`,
+`profile_manifest.json`, `raw/`, `fixtures/`, `build/`, and `harness/`, when
+archiving or transferring the study. The manifest records exact dependencies,
+source and native-extension hashes, case weights, seeds, settings, and reuse
+provenance. Preserve the repository's dependency lockfile and use the recorded
+runtime versions to reproduce the analysis. The `output/` directory is ignored
+by Git; committing the scripts alone does not archive the measurements.
+
+A fresh `full_sweep` run recompiles every arm. To repeat the historical experiment,
+use the same prebuilt Qiskit Git checkout, profile inputs, and dependency versions
+recorded in the saved manifest. A changed candidate or profile is a new experiment.
+The archived `build/source` is a frozen file snapshot, not a Git checkout, and
+cannot be passed directly to `--source`. Session timestamps and provenance IDs
+of a fresh collection differ; rebuilding a native extension on another platform
+can also change numerical results. Regenerating from saved raw data reconstructs
+the recorded measurements, statistics, and plotted values. SVG/PDF export
+timestamps and internal identifiers may differ even when those values match.
+
 ## Pilot and custom settings
+
+To add coefficients to a completed study, use a new extension directory. This
+reuses the parent's frozen build, inputs, preparations, settings, and observations
+(including decay), then compiles only the newly requested weights:
+
+```bash
+uv run python -m wait_time_ablation.extend \
+  --base-output output/wait_time_weight_ablation_end_to_end \
+  --weights 0.05,0.1,0.25,0.5,0.75 \
+  --output output/wait_time_weight_ablation_end_to_end_extended
+
+uv run python -m wait_time_ablation report \
+  --output output/wait_time_weight_ablation_end_to_end_extended
+```
+
+For the original 11-weight study, this adds 30,500 observations and reuses the existing
+73,200, yielding 103,700 combined observations. The parent remains independently
+reproducible; each inherited row records its original session and checksum.
+The extension requires a complete verified parent, matching collection code and
+runtime dependencies, and weights absent from the parent. Repeat the same
+extension command to resume; successes are retained, and only failed or missing
+new-weight samples can be compiled. Reports show the combined weight range and
+disclose that it was expanded after inspecting the original results.
+
+The final extension added only `0.0025`, reusing those 103,700 observations:
+
+```bash
+.venv/bin/python -m wait_time_ablation.extend \
+  --base-output output/wait_time_weight_ablation_end_to_end_extended \
+  --weights 0.0025 \
+  --output output/wait_time_weight_ablation_end_to_end_extended_0025
+```
+
+This produces the completed 109,800-observation session used by the reconstruction
+command above. Repeating this extension command validates and reuses the saved
+samples; it does not recompile successful observations.
 
 Start with a small pilot before a full study:
 

@@ -115,6 +115,64 @@ def report_fixture():
     return manifest, observations, analysis
 
 
+@pytest.fixture
+def extended_report_fixture(report_fixture):
+    manifest, observations, analysis = copy.deepcopy(report_fixture)
+    weights = [
+        0,
+        1e-8,
+        1e-7,
+        1e-6,
+        3e-6,
+        1e-5,
+        2.2e-5,
+        5e-5,
+        1e-4,
+        3e-4,
+        1e-3,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        0.75,
+    ]
+    manifest["arms"] = ["decay", *(f"wait_time:{weight:g}" for weight in weights)]
+    manifest["arm_configs"] = {
+        arm: {"arm": arm, "weight": weight, "weight_decimal": str(weight)}
+        for arm, weight in zip(manifest["arms"], [None, *weights], strict=True)
+    }
+    manifest["extension"] = {
+        "parent_output": "/frozen/original-study",
+        "parent_session_id": "original-session-id",
+        "parent_manifest_sha256": "original-manifest-hash",
+        "added_arms": manifest["arms"][-5:],
+        "reused_observations": 36,
+        "new_expected_observations": 15,
+        "driver_sha256": "extension-driver-hash",
+    }
+    rows = {(row["weight"], row["metric"]): row for row in analysis["aggregate_summaries"]}
+    analysis["aggregate_summaries"] = [
+        {
+            **copy.deepcopy(rows.get((weight, metric), rows[(0, metric)])),
+            "arm": f"wait_time:{weight:g}",
+            "weight": weight,
+            "weight_decimal": str(weight),
+        }
+        for weight in weights
+        for metric in ("D2", "N2")
+    ]
+    observations = [
+        {**copy.deepcopy(observations[0]), "arm": arm, "seed": seed}
+        for arm in manifest["arms"]
+        for seed in range(3)
+    ]
+    analysis["completeness"].update(
+        expected=len(observations), observed=len(observations), valid=len(observations)
+    )
+    analysis["meta"]["primary_endpoints"] = 32
+    return manifest, observations, analysis
+
+
 def test_coordinates_use_frozen_estimates_without_recentring_zero(report_fixture):
     manifest, _, analysis = report_fixture
     curve = curve_data(manifest, analysis, "D2")
@@ -180,6 +238,7 @@ def test_report_exports_figures_and_exact_coordinates_without_candidate_imports(
     for relative in result["figures"]:
         assert (tmp_path / relative).stat().st_size > 0
     exported = json.loads((tmp_path / "plot_data.json").read_text())
+    assert "extension" not in exported
     expected = {
         row["metric"]: curve_data(manifest, analysis, row["metric"]) for row in exported["curves"]
     }
@@ -197,6 +256,7 @@ def test_report_exports_figures_and_exact_coordinates_without_candidate_imports(
     assert len(rows) == len(observations)
     assert rows[0]["checks.C0.status"] == "verified"
     report = (tmp_path / "report.md").read_text()
+    assert "Extended sweep and data reuse" not in report
     for text in (
         "pilot",
         "pointwise",
@@ -209,6 +269,78 @@ def test_report_exports_figures_and_exact_coordinates_without_candidate_imports(
         "D2_change_vs_weight.png",
         "N2_change_vs_weight.png",
         "binary-hash",
+    ):
+        assert text in report
+
+
+def test_extended_report_discloses_reuse_and_preserves_all_weight_coordinates(
+    extended_report_fixture, tmp_path, monkeypatch
+):
+    manifest, observations, analysis = extended_report_fixture
+    import matplotlib.pyplot as plt
+
+    original_close = plt.close
+    figures = []
+
+    def capture_figure(figure=None):
+        if isinstance(figure, plt.Figure):
+            figures.append(figure)
+        else:
+            original_close(figure)
+
+    monkeypatch.setattr(plt, "close", capture_figure)
+    try:
+        generate_report(tmp_path, manifest, observations, analysis)
+        exported = json.loads((tmp_path / "plot_data.json").read_text())
+        assert exported["extension"] == manifest["extension"]
+        assert json.loads((tmp_path / "statistics.json").read_text()) == analysis
+        for curve in exported["curves"]:
+            expected = curve_data(manifest, analysis, curve["metric"])
+            assert curve["points"] == expected["points"]
+            assert curve["positive_line_segments"] == expected["positive_line_segments"]
+            assert curve["points"][0]["y"] != 0
+            assert [point["x"] for point in curve["points"][-5:]] == [
+                0.05,
+                0.1,
+                0.25,
+                0.5,
+                0.75,
+            ]
+        assert len(figures) == 2
+        for figure in figures:
+            figure.canvas.draw()
+            positive_axis = figure.axes[1]
+            labels = positive_axis.get_xticklabels()
+            assert [label.get_text() for label in labels[-5:]] == [
+                "0.05",
+                "0.1",
+                "0.25",
+                "0.5",
+                "0.75",
+            ]
+            bounds = [label.get_window_extent() for label in labels]
+            assert all(
+                not left.overlaps(right)
+                for left, right in zip(bounds[:-1], bounds[1:], strict=True)
+            )
+            assert positive_axis.get_xscale() == "log"
+    finally:
+        for figure in figures:
+            original_close(figure)
+    report = (tmp_path / "report.md").read_text()
+    for text in (
+        "expanded after inspecting the original results",
+        "Added coefficients: `0.05`, `0.1`, `0.25`, `0.5`, `0.75`",
+        "15 expected observations",
+        "36 inherited observations, including decay",
+        "reused once each",
+        "existing arms were not rerun",
+        "remain frozen from the parent session",
+        "same decay observations as their sole baseline",
+        "32-endpoint Bonferroni adjustment is descriptive",
+        "does not establish confirmatory superiority",
+        "original-session-id",
+        "original-manifest-hash",
     ):
         assert text in report
 
