@@ -492,7 +492,7 @@ def _report(manifest: dict, observations: list[dict], analysis: dict, coverage: 
             "",
             "Largest absolute contributions to panel log change (up to 12 across both metrics "
             "and all coefficients). Contributions equal frozen case weight × log(case mean ratio); "
-            "large cases can dominate the panel result.",
+            "heavily weighted cases can dominate the panel result.",
             "",
             "| Case | Weight | Metric | Weighted log contribution |",
             "| --- | ---: | --- | ---: |",

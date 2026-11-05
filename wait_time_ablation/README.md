@@ -13,6 +13,11 @@ The source must contain a prebuilt native Qiskit extension supporting
 snapshots that candidate and checks the weighted API and actual routing in an
 isolated process. It does not build or modify the candidate checkout.
 
+If preflight reports `with_wait_time() takes no arguments`, the loaded extension
+still implements the old strict tie-break API. Rebuild the weighted source for
+the Python interpreter running collection; updating Python or Rust source alone
+does not update the compiled extension.
+
 ## Collect and report
 
 ```bash
