@@ -4,6 +4,7 @@ import copy
 import importlib.machinery
 import io
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from compare_to_baseline import collect
 
 @pytest.fixture
 def frozen(tmp_path, monkeypatch):
+    monkeypatch.setenv("QTB_RUNNER_LOCK", str(tmp_path / "runner.lock"))
     repository = tmp_path / "repository"
     fixture = repository / "fixtures"
     fixture.mkdir(parents=True)
@@ -95,7 +97,12 @@ def test_freeze_separates_builds_inputs_and_seeds(frozen):
     output, evolved, baseline, _ = args
     assert [case["case_id"] for case in manifest["cases"]] == ["a", "b"]
     assert [case["weight"] for case in manifest["cases"]] == pytest.approx([0.25, 0.75])
-    assert manifest["expected_observations"] == 8
+    assert manifest["expected_quality_observations"] == 8
+    assert manifest["expected_runtime_observations"] == 8
+    assert manifest["expected_observations"] == 16
+    assert manifest["settings"]["workers"] == 6
+    assert manifest["settings"]["evolved_wait_time_weight"] == 0.0025
+    assert "weight=0.0025" in manifest["heuristics"]["evolved"]
     assert manifest["build_policy"] == "release_only"
     assert all(source["native_profile"] == "release" for source in manifest["sources"].values())
     assert manifest["sources"]["baseline"]["build_id"] != manifest["sources"]["evolved"]["build_id"]
@@ -105,11 +112,15 @@ def test_freeze_separates_builds_inputs_and_seeds(frozen):
         ).read_bytes()
     for case in manifest["cases"]:
         assert case["seeds"]["baseline"] != case["seeds"]["evolved"]
+        assert case["runtime_seeds"]["baseline"] != case["runtime_seeds"]["evolved"]
+        assert case["runtime_seeds"]["baseline"] != case["seeds"]["baseline"]
         assert case["configuration_digests"]["baseline"] != case["configuration_digests"]["evolved"]
     collect.validate_session(output, manifest)
 
 
-@pytest.mark.parametrize("change", ["settings", "input", "binary", "harness", "host", "manifest"])
+@pytest.mark.parametrize(
+    "change", ["settings", "input", "binary", "harness", "host", "manifest", "wait_time_weight"]
+)
 def test_resume_rejects_changed_frozen_design(frozen, monkeypatch, change):
     args, manifest = frozen
     output = args[0]
@@ -124,6 +135,8 @@ def test_resume_rejects_changed_frozen_design(frozen, monkeypatch, change):
         monkeypatch.setattr(collect, "harness_inventory", lambda: {"change": "hash"})
     elif change == "host":
         monkeypatch.setattr(collect, "host_identity", lambda: {"node": "another-machine"})
+    elif change == "wait_time_weight":
+        monkeypatch.setattr(collect, "EVOLVED_WAIT_TIME_WEIGHT", 2.2e-5)
     else:
         manifest["cases"][0]["weight"] = 0.5
         collect.write_json(output / "manifest.json", manifest)
@@ -131,13 +144,14 @@ def test_resume_rejects_changed_frozen_design(frozen, monkeypatch, change):
         collect.freeze(*args, seed_count=seed_count)
 
 
-def observation(manifest, case, arm, seed):
+def observation(manifest, case, arm, seed, phase="runtime"):
     identity = {
         "output_sha256": collect.digest("output"),
         "logical_layout_digest": collect.digest("layout"),
     }
-    return {
+    row = {
         **identity,
+        "phase": phase,
         "case_id": case["case_id"],
         "arm": arm,
         "seed": seed,
@@ -156,12 +170,16 @@ def observation(manifest, case, arm, seed):
         },
     }
 
+    if phase == "quality":
+        del row["runtime_s"], row["runtime_samples_s"], row["checks"]["timed_output"]
+    return row
+
 
 def test_load_rejects_wrong_build_duplicate_and_invalid_timings(frozen):
     args, manifest = frozen
     case = manifest["cases"][0]
-    row = observation(manifest, case, "baseline", case["seeds"]["baseline"][0])
-    path = collect.row_path(args[0], row["case_id"], row["arm"], row["seed"])
+    row = observation(manifest, case, "baseline", case["runtime_seeds"]["baseline"][0])
+    path = collect.row_path(args[0], row["case_id"], row["arm"], row["seed"], row["phase"])
     collect.write_json(path, row)
     assert collect.load_observations(args[0], manifest) == [row]
     for field, value, message in (
@@ -182,7 +200,7 @@ def test_load_rejects_wrong_build_duplicate_and_invalid_timings(frozen):
 def test_success_requires_consistent_validation_evidence(frozen, changed):
     args, manifest = frozen
     case = manifest["cases"][0]
-    row = observation(manifest, case, "baseline", case["seeds"]["baseline"][0])
+    row = observation(manifest, case, "baseline", case["runtime_seeds"]["baseline"][0])
     if changed == "missing":
         del row["checks"]
     elif changed == "metrics":
@@ -191,7 +209,9 @@ def test_success_requires_consistent_validation_evidence(frozen, changed):
         row["checks"]["timed_output"]["identities"][0]["output_sha256"] = "another-output"
     else:
         row["checks"][changed]["status"] = "mismatch"
-    collect.write_json(collect.row_path(args[0], row["case_id"], row["arm"], row["seed"]), row)
+    collect.write_json(
+        collect.row_path(args[0], row["case_id"], row["arm"], row["seed"], row["phase"]), row
+    )
     with pytest.raises(ValueError):
         collect.load_observations(args[0], manifest)
 
@@ -352,8 +372,9 @@ def test_collection_alternates_builds_and_resumes_only_failed_seeds(frozen, monk
 
         def request(self, action, timeout, **kwargs):
             events.append((self.case["case_id"], self.arm, action, kwargs.get("seed")))
-            if action == "sample":
-                return observation(manifest, self.case, self.arm, kwargs["seed"])
+            if action in ("sample", "quality_sample"):
+                phase = "runtime" if action == "sample" else "quality"
+                return observation(manifest, self.case, self.arm, kwargs["seed"], phase)
             return {"status": "ok"}
 
         def close(self):
@@ -377,8 +398,8 @@ def test_collection_alternates_builds_and_resumes_only_failed_seeds(frozen, monk
     collect.collect(*args, seed_count=2)
     assert events == []
     case = manifest["cases"][0]
-    seed = case["seeds"]["evolved"][1]
-    path = collect.row_path(args[0], case["case_id"], "evolved", seed)
+    seed = case["runtime_seeds"]["evolved"][1]
+    path = collect.row_path(args[0], case["case_id"], "evolved", seed, "runtime")
     failed = copy.deepcopy(json.loads(path.read_text()))
     failed.update(status="failed", error="interrupted")
     collect.write_json(path, failed)
@@ -395,11 +416,11 @@ def test_worker_response_must_match_the_requested_seed(frozen, monkeypatch):
             self.arm, self.case = arm, case
 
         def request(self, action, timeout, **kwargs):
-            if action == "sample":
+            if action == "quality_sample":
                 other = next(
                     seed for seed in self.case["seeds"][self.arm] if seed != kwargs["seed"]
                 )
-                return observation(manifest, self.case, self.arm, other)
+                return observation(manifest, self.case, self.arm, other, "quality")
             return {"status": "ok"}
 
         def close(self):
@@ -409,9 +430,11 @@ def test_worker_response_must_match_the_requested_seed(frozen, monkeypatch):
     with pytest.raises(ValueError, match="different case, build, or seed"):
         collect.collect(*args, seed_count=2)
     rows = collect.load_observations(args[0], manifest)
-    assert len(rows) == 1
-    assert rows[0]["status"] == "failed"
-    assert rows[0]["seed"] == manifest["cases"][0]["seeds"]["baseline"][0]
+    assert rows
+    assert all(row["status"] == "failed" and row["phase"] == "quality" for row in rows)
+    for row in rows:
+        case = next(c for c in manifest["cases"] if c["case_id"] == row["case_id"])
+        assert row["seed"] == case["seeds"][row["arm"]][0]
     assert json.loads((args[0] / "collection_status.json").read_text())["status"] == "incomplete"
 
 
@@ -426,3 +449,150 @@ def test_cli_defaults_requested_checkouts(monkeypatch):
     assert calls[0][0][1].name == "qiskit-evolved"
     assert calls[0][0][2].name == "qiskit-evolved-main"
     assert calls[0][1]["seed_count"] == 100
+    assert calls[0][1]["runtime_seed_count"] == 2
+    assert calls[0][1]["workers"] == 6
+
+
+def test_quality_workers_finish_before_serial_runtime(frozen, monkeypatch):
+    args, _ = frozen
+    profile = json.loads(args[3].read_text())
+    third = dict(profile["cases"][0], case_id="c")
+    profile["cases"].append(third)
+    args[3].write_text(json.dumps(profile))
+    args = (args[0].parent / "six-workers", *args[1:])
+    manifest = collect.freeze(*args, seed_count=2)
+    rendezvous = threading.Barrier(6)
+    guard = threading.Lock()
+    quality_workers = set()
+    closed_quality = set()
+    quality_samples = []
+    runtime_samples = []
+    active_runtime = 0
+
+    class Worker:
+        def __init__(self, output, arm, case):
+            self.arm, self.case, self.phase = arm, case, None
+
+        def request(self, action, timeout, **kwargs):
+            nonlocal active_runtime
+            key = (self.case["case_id"], self.arm)
+            if action == "quality_sample":
+                if self.phase is None:
+                    self.phase = "quality"
+                    with guard:
+                        quality_workers.add(key)
+                    rendezvous.wait(timeout=5)
+                with guard:
+                    quality_samples.append((key, kwargs["seed"]))
+                return observation(manifest, self.case, self.arm, kwargs["seed"], "quality")
+            if action in ("warmup", "sample"):
+                with guard:
+                    assert len(closed_quality) == 6
+                    assert len(quality_samples) == 12
+                    assert active_runtime == 0
+                    active_runtime += 1
+                if action == "sample":
+                    runtime_samples.append((key, kwargs["seed"]))
+                    result = observation(manifest, self.case, self.arm, kwargs["seed"])
+                else:
+                    result = {"status": "ok"}
+                with guard:
+                    active_runtime -= 1
+                return result
+            return {"status": "ok"}
+
+        def close(self):
+            if self.phase == "quality":
+                with guard:
+                    closed_quality.add((self.case["case_id"], self.arm))
+
+    monkeypatch.setattr(collect, "Worker", Worker)
+    result = collect.collect(*args, seed_count=2)
+    assert result["status"] == "complete"
+    assert len(quality_workers) == 6
+    assert len(runtime_samples) == 12
+    assert result["phases"] == {
+        "quality": {"expected": 12, "successful": 12},
+        "runtime": {"expected": 12, "successful": 12},
+    }
+
+
+def test_quality_failures_defer_runtime_and_resume_identical_seed(frozen, monkeypatch):
+    args, manifest = frozen
+    case = manifest["cases"][0]
+    failure = (case["case_id"], "baseline", case["seeds"]["baseline"][0])
+    events = []
+    fail = True
+
+    class Worker:
+        def __init__(self, output, arm, case):
+            self.arm, self.case = arm, case
+
+        def request(self, action, timeout, **kwargs):
+            if action in ("quality_sample", "sample"):
+                phase = "quality" if action == "quality_sample" else "runtime"
+                key = (self.case["case_id"], self.arm, kwargs["seed"])
+                events.append((phase, key))
+                row = observation(manifest, self.case, self.arm, kwargs["seed"], phase)
+                if fail and key == failure:
+                    row.update(status="failed", error="C6 mismatch")
+                return row
+            assert action != "warmup" or not fail
+            return {"status": "ok"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(collect, "Worker", Worker)
+    status = collect.collect(*args, seed_count=2)
+    assert status["status"] == "incomplete"
+    assert status["phase"] == "quality"
+    assert len(events) == 8
+    assert all(phase == "quality" for phase, _ in events)
+    fail = False
+    events.clear()
+    status = collect.collect(*args, seed_count=2)
+    assert status["status"] == "complete"
+    assert events[0] == ("quality", failure)
+    assert len(events) == 9
+    assert all(phase == "runtime" for phase, _ in events[1:])
+    assert len(list((args[0] / "attempts").glob("*.json"))) == 1
+
+
+def test_legacy_session_can_be_reported_but_not_resumed(frozen):
+    args, manifest = frozen
+    manifest["format"] = collect.LEGACY_FORMAT
+    for case in manifest["cases"]:
+        case.pop("runtime_seeds")
+    manifest.pop("session_id")
+    manifest["session_id"] = collect.digest(manifest)
+    collect.write_json(args[0] / "manifest.json", manifest)
+    collect.validate_session(args[0], manifest, verify_build=False)
+    case = manifest["cases"][0]
+    row = observation(manifest, case, "baseline", case["seeds"]["baseline"][0])
+    del row["phase"]
+    collect.write_json(args[0] / "raw/legacy.json", row)
+    assert collect.load_observations(args[0], manifest) == [row]
+    with pytest.raises(ValueError, match="protocol changed.*new output"):
+        collect.freeze(*args, seed_count=2)
+
+
+@pytest.mark.parametrize("setting", ["seed_count", "runtime_seed_count", "workers"])
+def test_invalid_sample_settings_rejected(frozen, setting):
+    args, _ = frozen
+    with pytest.raises(ValueError, match="must be"):
+        collect.freeze(args[0].parent / "invalid", *args[1:], **{setting: 0})
+
+
+def test_quality_rows_have_separate_identity_and_cannot_supply_runtime(frozen):
+    args, manifest = frozen
+    case = manifest["cases"][0]
+    seed = case["seeds"]["baseline"][0]
+    row = observation(manifest, case, "baseline", seed, "quality")
+    path = collect.row_path(args[0], case["case_id"], "baseline", seed, "quality")
+    assert path != collect.row_path(args[0], case["case_id"], "baseline", seed, "runtime")
+    collect.write_json(path, row)
+    assert collect.load_observations(args[0], manifest) == [row]
+    collect.write_json(path, {**row, "runtime_s": 0.25})
+    with pytest.raises(ValueError, match="must not contain runtime"):
+        collect.load_observations(args[0], manifest)

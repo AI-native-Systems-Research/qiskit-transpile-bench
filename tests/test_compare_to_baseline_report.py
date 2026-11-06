@@ -258,6 +258,23 @@ def test_report_displays_native_profiles_and_unknown_fallback(panel, tmp_path, m
     assert "not proof of a release build" in report
 
 
+@pytest.mark.parametrize("weight", ["0.0025", "2.2e-5", None])
+def test_report_uses_frozen_wait_time_weight_without_relabeling_old_runs(
+    panel, tmp_path, monkeypatch, weight
+):
+    manifest, observations = panel
+    if weight is not None:
+        manifest["heuristics"] = {
+            "evolved": f"Decay plus wait time, weight={weight}, layout and routing"
+        }
+    monkeypatch.setattr("compare_to_baseline.report._figures", lambda *_: None)
+    generate_report(tmp_path, manifest, observations, analyze(manifest, observations))
+    report = (tmp_path / "report.md").read_text()
+    assert f"weight={weight or '2.2e-5'}" in report
+    if weight != "0.0025":
+        assert "weight=0.0025" not in report
+
+
 @pytest.mark.parametrize("release_only", [False, True])
 def test_report_only_claims_release_policy_when_frozen_in_manifest(
     panel, tmp_path, monkeypatch, release_only
@@ -272,3 +289,149 @@ def test_report_only_claims_release_policy_when_frozen_in_manifest(
     if release_only:
         assert "recorded release build artifacts by SHA-256" in report
         assert "Debug, unknown, missing, and ambiguous evidence is rejected" in report
+
+
+@pytest.fixture
+def split_panel():
+    cases = [{
+        "case_id": "split/case",
+        "family": "family",
+        "optimization_level": 2,
+        "weight": 1,
+        "seeds": {"baseline": list(range(100)), "evolved": list(range(100, 200))},
+        # Even coincident seed numbers in independent streams must remain separate rows.
+        "runtime_seeds": {"baseline": [0, 201], "evolved": [100, 202]},
+    }]
+    manifest = {
+        "format": "qtb-compare-to-baseline/2",
+        "cases": cases,
+        "expected_observations": 204,
+        "expected_quality_observations": 200,
+        "expected_runtime_observations": 4,
+        "settings": {
+            "workers": 6, "seed_count": 100, "runtime_seed_count": 2,
+            "trials": 20, "warmups": 1, "runtime_repeats": 3,
+        },
+    }
+    observations = []
+    case = cases[0]
+    for arm in ("baseline", "evolved"):
+        factor = 1 if arm == "baseline" else 0.5
+        for index, seed in enumerate(case["seeds"][arm]):
+            observations.append({
+                "phase": "quality", "case_id": case["case_id"], "arm": arm,
+                "seed": seed, "status": "ok", "D2": (10 + index) * factor,
+                "N2": (20 + index) * factor,
+            })
+        for value, seed in zip((1, 3), case["runtime_seeds"][arm], strict=True):
+            observations.append({
+                "phase": "runtime", "case_id": case["case_id"], "arm": arm,
+                "seed": seed, "status": "ok", "D2": 999999, "N2": 999999,
+                "runtime_s": value * factor, "runtime_samples_s": [value * factor] * 3,
+            })
+    return manifest, observations
+
+
+def test_separate_phase_sample_counts_and_metrics(split_panel):
+    manifest, observations = split_panel
+    result = analyze(manifest, observations)
+    assert result["format"] == "qtb-two-build-statistics/2"
+    assert result["completeness"]["status"] == "complete"
+    assert result["completeness"]["successful"] == 204
+    assert result["completeness"]["phases"]["quality"]["successful"] == 200
+    assert result["completeness"]["phases"]["runtime"]["successful"] == 4
+    depth = select(result["arm_summaries"], arm="baseline", metric="D2")
+    assert depth["n"] == depth["expected_n"] == 100
+    assert depth["mean"] == 59.5
+    runtime = select(result["arm_summaries"], arm="baseline", metric="runtime_s")
+    assert runtime["n"] == runtime["expected_n"] == 2
+    assert runtime["mean"] == 2
+    assert runtime["sample_sd"] == pytest.approx(math.sqrt(2))
+    assert all(row["ratio"] == 0.5 for row in result["case_comparisons"])
+
+
+@pytest.mark.parametrize("defect", ["missing", "failed", "invalid"])
+def test_incomplete_runtime_does_not_invalidate_quality(split_panel, defect):
+    manifest, observations = split_panel
+    assert observations[-1]["phase"] == "runtime"
+    if defect == "missing":
+        observations.pop()
+    elif defect == "failed":
+        observations[-1].update(status="failed", error="timing failed")
+    else:
+        observations[-1]["runtime_s"] = float("nan")
+    result = analyze(manifest, observations)
+    assert result["completeness"]["status"] == "incomplete"
+    assert result["completeness"]["phases"]["quality"]["status"] == "complete"
+    runtime = result["completeness"]["phases"]["runtime"]
+    assert runtime["status"] == "incomplete"
+    assert runtime["successful"] == 3
+    for metric in ("D2", "N2"):
+        assert select(result["aggregate_summary"], metric=metric, statistic="mean")[
+            "status"
+        ] == "complete"
+    assert select(result["aggregate_summary"], metric="runtime_s", statistic="mean")[
+        "status"
+    ] == "unavailable"
+    missing = result["missing_observations"]
+    if defect == "missing":
+        assert missing == [{
+            "phase": "runtime", "case_id": "split/case", "arm": "evolved", "seed": 202,
+        }]
+    json.dumps(result, allow_nan=False)
+
+
+def test_quality_phase_is_reportable_before_runtime_starts(split_panel):
+    manifest, observations = split_panel
+    observations = [row for row in observations if row["phase"] == "quality"]
+    result = analyze(manifest, observations)
+    assert result["completeness"]["missing"] == 4
+    assert result["completeness"]["phases"]["quality"]["status"] == "complete"
+    assert all(
+        row["n"] == 0 and row["expected_n"] == 2
+        for row in result["arm_summaries"] if row["metric"] == "runtime_s"
+    )
+    plots = _scatter_data(manifest, result)
+    assert len(select(plots, metric="D2")["points"]) == 1
+    assert select(plots, metric="runtime_s")["points"] == []
+
+
+@pytest.mark.parametrize("defect", ["duplicate", "missing_phase", "wrong_phase", "wrong_seed"])
+def test_split_observations_must_match_frozen_phase(split_panel, defect):
+    manifest, observations = split_panel
+    if defect == "duplicate":
+        observations.append(copy.deepcopy(observations[-1]))
+    elif defect == "missing_phase":
+        observations[-1].pop("phase")
+    elif defect == "wrong_phase":
+        observations[-1]["phase"] = "combined"
+    else:
+        observations[-1]["seed"] = 101  # An evolved quality seed, absent from runtime seeds.
+    with pytest.raises(ValueError, match="Duplicate observation|not in frozen"):
+        analyze(manifest, observations)
+
+
+def test_split_expected_counts_are_checked_against_each_stream(split_panel):
+    manifest, observations = split_panel
+    manifest["expected_runtime_observations"] = 200
+    with pytest.raises(ValueError, match="Expected runtime observation count"):
+        analyze(manifest, observations)
+
+
+def test_split_report_describes_budgets_and_small_runtime_sample(
+    split_panel, tmp_path, monkeypatch
+):
+    manifest, observations = split_panel
+    monkeypatch.setattr("compare_to_baseline.report._figures", lambda *_: None)
+    generate_report(tmp_path, manifest, observations, analyze(manifest, observations))
+    report = (tmp_path / "report.md").read_text()
+    assert "Quality phase: **complete** — 200/200" in report
+    assert "Runtime phase: **complete** — 4/4" in report
+    assert "6 worker processes and 100 seeds per case and build" in report
+    assert "After all quality workers finish" in report
+    assert "serially with 2 separate seeds per case and build" in report
+    assert "Small runtime sample" in report
+    with (tmp_path / "arm_summaries.csv").open() as stream:
+        summaries = list(csv.DictReader(stream))
+    assert select(summaries, arm="baseline", metric="D2")["n"] == "100"
+    assert select(summaries, arm="baseline", metric="runtime_s")["n"] == "2"

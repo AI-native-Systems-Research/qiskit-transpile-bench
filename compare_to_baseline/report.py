@@ -60,7 +60,8 @@ def _interval(ratio, variance):
 
 def _summary(case, arm, metric, values):
     values = sorted(values)
-    n, expected = len(values), len(case["seeds"][arm])
+    seed_field = "runtime_seeds" if metric == "runtime_s" and "runtime_seeds" in case else "seeds"
+    n, expected = len(values), len(case[seed_field][arm])
     result = {
         "case_id": case["case_id"],
         "family": case.get("family"),
@@ -144,20 +145,40 @@ def analyze(manifest, observations):
         raise ValueError("Case weights must be finite and positive")
     if not math.isclose(math.fsum(case["weight"] for case in cases), 1, abs_tol=1e-10):
         raise ValueError("Frozen case weights must sum to one")
+    split = manifest.get("format") == "qtb-compare-to-baseline/2" or any(
+        "runtime_seeds" in case for case in cases
+    )
+    seed_fields = (
+        {"quality": "seeds", "runtime": "runtime_seeds"} if split else {"combined": "seeds"}
+    )
+    phase_metrics = {"quality": ("D2", "N2"), "runtime": ("runtime_s",), "combined": METRICS}
     expected_keys = set()
     for case in cases:
-        for arm in ARMS:
-            seeds = case["seeds"][arm]
-            if not seeds or len(set(seeds)) != len(seeds):
-                raise ValueError("Expected nonempty unique seed lists")
-            expected_keys.update((case["case_id"], arm, seed) for seed in seeds)
+        for phase, field in seed_fields.items():
+            for arm in ARMS:
+                seeds = case.get(field, {}).get(arm, [])
+                if not seeds or len(set(seeds)) != len(seeds):
+                    raise ValueError("Expected nonempty unique seed lists for each phase and build")
+                expected_keys.update((case["case_id"], arm, seed, phase) for seed in seeds)
     if manifest.get("expected_observations", len(expected_keys)) != len(expected_keys):
         raise ValueError("Expected observation count disagrees with frozen seeds")
+    for phase in seed_fields:
+        expected = sum(key[3] == phase for key in expected_keys)
+        if manifest.get(f"expected_{phase}_observations", expected) != expected:
+            raise ValueError(f"Expected {phase} observation count disagrees with frozen seeds")
+
+    def identity_for(key):
+        identity = dict(zip(("case_id", "arm", "seed"), key[:3], strict=True))
+        if split:
+            identity["phase"] = key[3]
+        return identity
+
     seen, successful = set(), set()
     values = defaultdict(list)
     failures, invalid = [], []
     for row in observations:
-        key = (row["case_id"], row["arm"], row["seed"])
+        phase = row.get("phase") if split else row.get("phase", "combined")
+        key = (row["case_id"], row["arm"], row["seed"], phase)
         if key in seen:
             raise ValueError(f"Duplicate observation: {key}")
         if key not in expected_keys:
@@ -165,12 +186,12 @@ def analyze(manifest, observations):
         if row.get("status") not in ("ok", "failed"):
             raise ValueError(f"Unknown observation status: {key}")
         seen.add(key)
-        identity = dict(zip(("case_id", "arm", "seed"), key, strict=True))
+        identity = identity_for(key)
         if row["status"] != "ok":
             failures.append({**identity, "error": row.get("error", "Validation failed")})
             continue
         row_valid = True
-        for metric in METRICS:
+        for metric in phase_metrics[phase]:
             value = row.get(metric)
             if _valid(value, metric):
                 values[(row["case_id"], row["arm"], metric)].append(value)
@@ -238,12 +259,24 @@ def analyze(manifest, observations):
                         )
                     result["ci"] = _interval(ratio, result["log_ratio_variance"])
             aggregate.append(result)
-    missing = [
-        dict(zip(("case_id", "arm", "seed"), key, strict=True))
-        for key in sorted(expected_keys - seen)
-    ]
+    missing = [identity_for(key) for key in sorted(expected_keys - seen)]
+    phases = {}
+    if split:
+        for phase in seed_fields:
+            expected = {key for key in expected_keys if key[3] == phase}
+            observed = {key for key in seen if key[3] == phase}
+            valid = {key for key in successful if key[3] == phase}
+            phases[phase] = {
+                "status": "complete" if valid == expected else "incomplete",
+                "expected": len(expected),
+                "observed": len(observed),
+                "successful": len(valid),
+                "failed": sum(row["phase"] == phase for row in failures),
+                "missing": len(expected - observed),
+                "invalid_metric_values": sum(row["phase"] == phase for row in invalid),
+            }
     return {
-        "format": "qtb-two-build-statistics/1",
+        "format": "qtb-two-build-statistics/2" if split else "qtb-two-build-statistics/1",
         "session_id": manifest.get("session_id"),
         "completeness": {
             "status": "complete" if successful == expected_keys else "incomplete",
@@ -253,6 +286,7 @@ def analyze(manifest, observations):
             "failed": len(failures),
             "missing": len(missing),
             "invalid_metric_values": len(invalid),
+            **({"phases": phases} if split else {}),
         },
         "methods": {
             "ratio": "evolved / baseline; smaller is better for all three metrics",
@@ -261,6 +295,10 @@ def analyze(manifest, observations):
             "variance": "sample variance with ddof=1",
             "confidence_intervals": "pointwise 95% independent-arm log-delta approximation",
             "runtime_unit": "seconds; one seed observation is the mean of its timed repetitions",
+            "sampling": (
+                "D2/N2 use quality-phase seeds only; runtime uses separate runtime-phase seeds only"
+                if split else "each seed contributes quality metrics and runtime"
+            ),
         },
         "arm_summaries": summaries,
         "case_comparisons": comparisons,
@@ -392,8 +430,26 @@ def generate_report(output, manifest, observations, analysis):
     _figures(root, plots)
     complete = analysis["completeness"]
     settings = manifest.get("settings", {})
+    evolved_configuration = manifest.get("heuristics", {}).get(
+        "evolved", "compare_distributions wait-time preset, weight=2.2e-5, layout and routing"
+    )
     smoke = manifest.get("smoke_test", False)
     release_only = manifest.get("build_policy") == "release_only"
+    phases = complete.get("phases", {})
+    sampling_protocol = (
+        f"Quality collection runs with {settings.get('workers', 'see manifest')} worker processes "
+        f"and {settings.get('seed_count', 'see manifest')} seeds per case and build. D2 and N2 "
+        "use only those checked quality observations. After all quality workers finish, runtime "
+        f"collection runs serially with {settings.get('runtime_seed_count', 'see manifest')} "
+        "separate seeds per case and build. Quality metrics from runtime validation do not "
+        "enter the D2/N2 distributions."
+        if phases else "Each seed supplies quality metrics and a separate timed compilation."
+    )
+    small_runtime_sample = phases and any(
+        len(seeds) <= 2
+        for case in manifest["cases"]
+        for seeds in case["runtime_seeds"].values()
+    )
     lines = [
         "# Evolved versus baseline", "",
         *([
@@ -405,6 +461,12 @@ def generate_report(output, manifest, observations, analysis):
         f"{complete['missing']:,} missing, and "
         f"{complete['invalid_metric_values']:,} invalid metric values.",
         "",
+        *[
+            f"{phase.capitalize()} phase: **{status['status']}** — "
+            f"{status['successful']:,}/{status['expected']:,} successful observations."
+            for phase, status in phases.items()
+        ],
+        *([""] if phases else []),
         *([
             "**Build policy: release only.** Collection, resume, worker preflight, and CLI "
             "reporting require both native extensions to match their recorded release build "
@@ -450,22 +512,30 @@ def generate_report(output, manifest, observations, analysis):
         "", "## Measurement protocol", "",
         "The benchmark uses the scored, exact-100-seed eligibility rule from "
         "`compare_distributions`, with the selected cases, seeds, weights, and build snapshots "
-        "frozen in `manifest.json`. A reduced case selection or seed count is a smoke run, "
+        "frozen in `manifest.json`. A reduced case selection or "
+        f"{'quality ' if phases else ''}seed count is a smoke run, "
         "not the complete confirmation panel.", "",
         "Each build runs the full preset pipeline from the original logical circuit. "
-        "Evolved uses the compare_distributions wait-time configuration; baseline uses decay "
-        "without wait time. Both use the same trial budgets and optimization settings. "
+        f"Frozen evolved configuration: {evolved_configuration}. "
+        "Baseline uses decay without wait time. "
+        "Both use the same trial budgets and optimization settings. "
         "D2 and N2 are final native two-qubit depth and gate count, "
         "not hardware execution time.", "",
+        sampling_protocol, "",
         "Runtime is wall-clock seconds for fresh preset construction, heuristic configuration, "
         "and transpilation. Imports, input loading/copying, validation, and serialization are "
         "outside the timed region. Builds execute in turn with native thread limits. "
         f"Settings: {settings.get('trials', 'see manifest')} trials, "
         f"{settings.get('warmups', 'see manifest')} warmups, and "
         f"{settings.get('runtime_repeats', 'see manifest')} timed repetitions per seed.", "",
-        "Each seed contributes one runtime observation: the arithmetic mean of its repetitions. "
+        "Each runtime seed contributes one observation: the arithmetic mean of its repetitions. "
         "Repeated timings are not counted as independent seed observations. Median, Q25, Q75, "
         "and P90 use nearest-rank ceil(n × p); sample standard deviation uses ddof=1.", "",
+        *([
+            "**Small runtime sample:** some or all case/build pairs have at most two runtime "
+            "seeds. Runtime spread, quantiles, and approximate confidence intervals are based "
+            "on very limited data; they do not characterize a 100-seed runtime distribution.", "",
+        ] if small_runtime_sample else []),
         "Mean-ratio intervals use a pointwise 95% independent-arm log-delta approximation. "
         "They describe variation over the collected seeds under this setup, are not adjusted "
         "for multiple comparisons, and do not capture machine-to-machine variation, thermal "

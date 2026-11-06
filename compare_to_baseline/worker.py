@@ -16,7 +16,7 @@ from statistics import fmean
 
 from compare_distributions.collect import THREAD_ENV, digest, file_hash, make_heuristic
 
-from .collect import require_release_builds
+from .collect import EVOLVED_WAIT_TIME_WEIGHT, require_release_builds
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,6 +62,11 @@ def compilation_deadline(case, phase):
         signal.setitimer(signal.ITIMER_REAL, delay, interval)
 
 
+def evolved_heuristic(width):
+    """Pin the evolved preset's current default weight for both layout and routing."""
+    return make_heuristic("decay", width).with_wait_time(EVOLVED_WAIT_TIME_WEIGHT)
+
+
 def configure_sabre(pm, arm, trials):
     """Pin equal search budgets while respecting the baseline's older layout API."""
     from qiskit.transpiler.passes import SabreLayout, SabreSwap
@@ -82,14 +87,14 @@ def configure_sabre(pm, arm, trials):
             task.swap_trials = trials
             task.skip_routing = False
             if arm == "evolved":
-                task.heuristic = make_heuristic("wait_time", task.target.num_qubits)
+                task.heuristic = evolved_heuristic(task.target.num_qubits)
             elif hasattr(task, "heuristic"):
                 # Older baselines have no such attribute and construct decay internally.
                 task.heuristic = None
         elif isinstance(task, SabreSwap):
             task.trials = trials
             task.heuristic = (
-                make_heuristic("wait_time", task.target.num_qubits) if arm == "evolved" else "decay"
+                evolved_heuristic(task.target.num_qubits) if arm == "evolved" else "decay"
             )
 
     walk(pm.to_flow_controller())
@@ -277,7 +282,7 @@ class Worker:
 
     def warmup(self):
         context = self.load_context()
-        seed = self.case["seeds"][self.arm][0]
+        seed = self.case.get("runtime_seeds", self.case["seeds"])[self.arm][0]
         for _ in range(self.settings["warmups"]):
             circuit = context["circuit"].copy()
             with compilation_deadline(self.case, "Warmup compilation"):
@@ -287,18 +292,38 @@ class Worker:
                 pm.run(circuit)
         return {"status": "ok", "warmups": self.settings["warmups"]}
 
-    def sample(self, seed):
-        row = {
+    def observation(self, seed, phase):
+        return {
             "case_id": self.case["case_id"],
             "arm": self.arm,
             "seed": seed,
+            "phase": phase,
             "session_id": self.manifest["session_id"],
             "build_id": self.manifest["sources"][self.arm]["build_id"],
             "configuration_digest": self.case["configuration_digests"][self.arm],
         }
+
+    def quality_sample(self, seed):
+        """Compile once with correctness snapshots, without measuring runtime."""
+        row = self.observation(seed, "quality")
         try:
             if type(seed) is not int or seed not in self.case["seeds"][self.arm]:
-                raise ValueError("Seed does not belong to this frozen case and arm")
+                raise ValueError("Seed does not belong to this frozen quality case and arm")
+            context = self.load_context()
+            row.update(
+                checked_compile(self.case, context, self.arm, seed, self.settings["trials"])
+            )
+        except Exception as exc:
+            row.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+        return row
+
+    def sample(self, seed):
+        """Measure an independent runtime seed and verify each timed output."""
+        row = self.observation(seed, "runtime")
+        try:
+            seeds = self.case.get("runtime_seeds", self.case["seeds"])[self.arm]
+            if type(seed) is not int or seed not in seeds:
+                raise ValueError("Seed does not belong to this frozen runtime case and arm")
             context = self.load_context()
             samples, identities = [], []
             for _ in range(self.settings["runtime_repeats"]):
@@ -343,6 +368,8 @@ def main(argv=None):
                     result = worker.warmup()
                 elif action == "sample":
                     result = worker.sample(command["seed"])
+                elif action == "quality_sample":
+                    result = worker.quality_sample(command["seed"])
                 else:
                     raise ValueError(f"Unknown worker action: {action}")
         except Exception as exc:

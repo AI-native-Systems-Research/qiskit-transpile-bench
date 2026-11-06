@@ -29,7 +29,13 @@ def main(argv=None):
         )
         command.add_argument("--master-seed", type=int, default=20261103)
         command.add_argument("--trials", type=int, default=20)
-        command.add_argument("--seeds", type=int, default=100, help="1..100 seeds/build/case")
+        command.add_argument(
+            "--seeds", type=int, default=100, help="1..100 quality seeds/build/case"
+        )
+        command.add_argument("--workers", type=int, default=6, help="Parallel quality workers")
+        command.add_argument(
+            "--runtime-seeds", type=int, default=2, help="1..100 serial runtime seeds/build/case"
+        )
         command.add_argument("--case", action="append", default=[], dest="case_ids")
         command.add_argument("--warmups", type=int, default=1)
         command.add_argument("--runtime-repeats", type=int, default=1)
@@ -48,6 +54,8 @@ def main(argv=None):
                 master_seed=args.master_seed,
                 trials=args.trials,
                 seed_count=args.seeds,
+                workers=args.workers,
+                runtime_seed_count=args.runtime_seeds,
                 warmups=args.warmups,
                 runtime_repeats=args.runtime_repeats,
                 case_ids=args.case_ids,

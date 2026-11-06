@@ -129,11 +129,15 @@ def test_evolved_configures_both_layout_and_fallback_routing(monkeypatch, legacy
             self.heuristic = heuristic
 
     monkeypatch.setattr(passes, "SabreLayout", NewLayout)
-    monkeypatch.setattr(worker, "make_heuristic", lambda arm, width: (arm, width))
+    def decay_preset(arm, width):
+        assert arm == "decay"
+        return SimpleNamespace(with_wait_time=lambda weight: ("wait_time", width, weight))
+
+    monkeypatch.setattr(worker, "make_heuristic", decay_preset)
     layout, swap = NewLayout(), legacy_sabre[1]
     manager = SimpleNamespace(to_flow_controller=lambda: SimpleNamespace(tasks=[layout, swap]))
     worker.configure_sabre(manager, "evolved", 7)
-    assert layout.heuristic == swap.heuristic == ("wait_time", 8)
+    assert layout.heuristic == swap.heuristic == ("wait_time", 8, 0.0025)
     assert layout.layout_trials == layout.swap_trials == swap.trials == 7
 
 
@@ -268,6 +272,7 @@ def test_timed_outputs_must_match_checked_output(monkeypatch, mismatched):
         },
     )
     row = instance.sample(17)
+    assert row["phase"] == "runtime"
     assert row["runtime_s"] == pytest.approx(0.3)
     assert row["runtime_samples_s"] == [0.2, 0.4]
     assert row["status"] == ("failed" if mismatched else "ok")
@@ -282,6 +287,101 @@ def test_unfrozen_seed_fails_before_compilation(monkeypatch):
     row = instance.sample(18)
     assert row["status"] == "failed"
     assert "frozen" in row["error"]
+
+
+@pytest.mark.parametrize("checked_status", ["ok", "failed"])
+def test_quality_compiles_once_without_timing_and_preserves_validation(monkeypatch, checked_status):
+    instance = fake_worker()
+    instance.case["runtime_seeds"] = {"baseline": [23, 29]}
+    calls = []
+    checked = {
+        "status": checked_status,
+        "D2": 4,
+        "N2": 6,
+        "output_sha256": "final",
+        "logical_layout_digest": "layout",
+        "checks": {
+            "C0": {"status": "verified", "D2": 4, "N2": 6, "errors": []},
+            "C6": {"status": "verified" if checked_status == "ok" else "mismatch"},
+        },
+    }
+
+    def compile_checked(case, context, arm, seed, trials):
+        calls.append((arm, seed, trials))
+        return checked
+
+    monkeypatch.setattr(worker, "checked_compile", compile_checked)
+    monkeypatch.setattr(worker, "timed_compile", lambda *args: pytest.fail("Must not time quality"))
+    row = instance.quality_sample(17)
+    assert calls == [("baseline", 17, 20)]
+    assert row["phase"] == "quality"
+    assert all(row[key] == value for key, value in checked.items())
+    assert "runtime_s" not in row
+    assert "runtime_samples_s" not in row
+    assert "timed_output" not in row["checks"]
+
+
+@pytest.mark.parametrize(
+    ("method", "seed"),
+    [("quality_sample", 23), ("sample", 17), ("quality_sample", True), ("sample", 23.0)],
+)
+def test_each_phase_rejects_seeds_outside_its_frozen_list(monkeypatch, method, seed):
+    instance = fake_worker()
+    instance.case["runtime_seeds"] = {"baseline": [23, 29]}
+    instance.load_context = lambda: pytest.fail("Invalid seed must fail before loading input")
+    monkeypatch.setattr(worker, "timed_compile", lambda *args: pytest.fail("Must not compile"))
+    monkeypatch.setattr(worker, "checked_compile", lambda *args: pytest.fail("Must not compile"))
+    row = getattr(instance, method)(seed)
+    assert row["status"] == "failed"
+    assert "frozen" in row["error"]
+
+
+def test_runtime_uses_its_own_seeds_repeats_then_checks_once(monkeypatch):
+    instance = fake_worker()
+    instance.case["runtime_seeds"] = {"baseline": [23, 29]}
+    events = []
+    identity = {"output_sha256": "final", "logical_layout_digest": "layout"}
+
+    def timed(case, context, arm, seed, trials):
+        events.append(("timed", seed))
+        return "output", 0.25
+
+    def checked(case, context, arm, seed, trials):
+        events.append(("checked", seed))
+        return {
+            **identity,
+            "status": "ok",
+            "D2": 4,
+            "N2": 6,
+            "checks": {"C0": {"status": "verified"}, "C6": {"status": "verified"}},
+        }
+
+    monkeypatch.setattr(worker, "timed_compile", timed)
+    monkeypatch.setattr(worker, "checked_compile", checked)
+    monkeypatch.setattr(worker, "output_identity", lambda *args: identity)
+    row = instance.sample(23)
+    assert events == [("timed", 23), ("timed", 23), ("checked", 23)]
+    assert row["phase"] == "runtime"
+    assert row["status"] == "ok"
+    assert row["runtime_samples_s"] == [0.25, 0.25]
+
+
+def test_warmup_uses_runtime_seed(monkeypatch):
+    instance = fake_worker()
+    instance.case["runtime_seeds"] = {"baseline": [23, 29]}
+    instance.settings["warmups"] = 2
+    instance.load_context = lambda: {
+        "circuit": SimpleNamespace(copy=lambda: "copy"), "target": "target"
+    }
+    seeds = []
+
+    def build(case, target, arm, seed, trials):
+        seeds.append(seed)
+        return SimpleNamespace(run=lambda circuit: None), {}
+
+    monkeypatch.setattr(worker, "build_pass_manager", build)
+    assert instance.warmup() == {"status": "ok", "warmups": 2}
+    assert seeds == [23, 23]
 
 
 def test_identity_ignores_ancilla_order_but_retains_logical_mapping_and_routing():

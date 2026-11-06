@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import copy
 import datetime as dt
 import importlib.machinery
@@ -15,6 +16,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import ExitStack, suppress
@@ -33,7 +35,9 @@ from compare_distributions.collect import (
 
 ROOT = Path(__file__).resolve().parents[1]
 ARMS = ("baseline", "evolved")
-FORMAT = "qtb-compare-to-baseline/1"
+EVOLVED_WAIT_TIME_WEIGHT = 0.0025
+FORMAT = "qtb-compare-to-baseline/2"
+LEGACY_FORMAT = "qtb-compare-to-baseline/1"
 DEPENDENCIES = ("numpy", "scipy", "rustworkx", "dill", "stevedore", "sympy")
 NATIVE_LIBRARIES = ("libqiskit_pyext.dylib", "libqiskit_pyext.so", "qiskit_pyext.dll")
 
@@ -195,7 +199,7 @@ def snapshot_source(root, source, arm):
 
 def validate_session(output, manifest, verify_build=True):
     root = Path(output)
-    if manifest.get("format") != FORMAT:
+    if manifest.get("format") not in (FORMAT, LEGACY_FORMAT):
         raise ValueError("Unsupported compare_to_baseline manifest")
     if digest({k: v for k, v in manifest.items() if k != "session_id"}) != manifest["session_id"]:
         raise ValueError("Frozen manifest identity changed")
@@ -225,6 +229,8 @@ def freeze(
     master_seed=20261103,
     trials=20,
     seed_count=100,
+    runtime_seed_count=2,
+    workers=6,
     warmups=1,
     runtime_repeats=1,
     case_ids=(),
@@ -233,22 +239,32 @@ def freeze(
     sources = {"baseline": Path(baseline).resolve(), "evolved": Path(evolved).resolve()}
     if sources["baseline"] == sources["evolved"]:
         raise ValueError("Baseline and evolved must be different source checkouts")
-    if not 1 <= seed_count <= 100 or trials < 1 or warmups < 1 or runtime_repeats < 1:
+    if (
+        not 1 <= seed_count <= 100
+        or not 1 <= runtime_seed_count <= 100
+        or trials < 1 or warmups < 1 or runtime_repeats < 1 or workers < 1
+    ):
         raise ValueError(
-            "seeds must be 1..100; trials, warmups, and runtime-repeats must be positive"
+            "seeds and runtime-seeds must be 1..100; "
+            "workers, trials, warmups, and runtime-repeats must be positive"
         )
     settings = {
         "master_seed": master_seed,
         "trials": trials,
         "seed_count": seed_count,
+        "runtime_seed_count": runtime_seed_count,
+        "workers": workers,
         "warmups": warmups,
         "runtime_repeats": runtime_repeats,
+        "evolved_wait_time_weight": EVOLVED_WAIT_TIME_WEIGHT,
         "case_ids": sorted(set(case_ids)),
     }
     manifest_path = root / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
         require_release_builds(manifest)
+        if manifest.get("format") != FORMAT:
+            raise ValueError("Collection protocol changed; use a new output directory")
         if (
             manifest["settings"] != settings
             or manifest["profile_sha256"] != file_hash(profile)
@@ -304,6 +320,10 @@ def freeze(
         case["seeds"] = {
             arm: seed_list(master_seed, case["case_id"], arm)[:seed_count] for arm in ARMS
         }
+        case["runtime_seeds"] = {
+            arm: seed_list(master_seed, case["case_id"], f"runtime/{arm}")[:runtime_seed_count]
+            for arm in ARMS
+        }
         case["configuration_digests"] = {
             arm: digest(
                 {"case": case, "arm": arm, "source": frozen_sources[arm], "settings": settings}
@@ -336,20 +356,31 @@ def freeze(
         "dependencies": {name: importlib.metadata.version(name) for name in DEPENDENCIES},
         "host": host_identity(),
         "thread_environment": THREAD_ENV,
-        "seed_protocol": "Independent deterministic per-case/per-build seed streams; no pairing",
+        "seed_protocol": (
+            "Independent deterministic per-case/per-build/per-phase seed streams; no pairing"
+        ),
+        "quality_protocol": (
+            "Parallel isolated processes, one native thread per worker; "
+            "one checked compilation per quality seed for D2/N2"
+        ),
         "timing_protocol": (
-            "Serial isolated persistent processes; alternate first build each seed and case; "
+            "After all quality workers finish successfully, serial isolated persistent processes; "
+            "alternate first build each runtime seed and case; "
             "warm up each case/build; fresh preset construction, SABRE configuration, and run; "
             "input copying, imports, serialization, C0/C6 audit excluded; "
             "repetitions averaged within a seed, independent seeds summarized per build"
         ),
         "heuristics": {
             "baseline": "Stock decay in integrated SabreLayout and fallback SabreSwap",
-            "evolved": "compare_distributions wait_time preset, weight=2.2e-5, layout and routing",
+            "evolved": (
+                f"Decay + wait time, weight={EVOLVED_WAIT_TIME_WEIGHT:g}, layout and routing"
+            ),
         },
         "smoke_test": seed_count != 100 or bool(requested),
         "cases": cases,
-        "expected_observations": len(cases) * seed_count * len(ARMS),
+        "expected_quality_observations": len(cases) * seed_count * len(ARMS),
+        "expected_runtime_observations": len(cases) * runtime_seed_count * len(ARMS),
+        "expected_observations": len(cases) * (seed_count + runtime_seed_count) * len(ARMS),
     }
     manifest["session_id"] = digest(manifest)
     write_json(manifest_path, manifest)
@@ -360,8 +391,12 @@ def freeze(
     return manifest
 
 
-def row_path(output, case_id, arm, seed):
-    return Path(output) / "raw" / (digest([case_id, arm, seed]) + ".json")
+def row_path(output, case_id, arm, seed, phase="quality"):
+    return Path(output) / "raw" / (digest([case_id, arm, phase, seed]) + ".json")
+
+
+def observation_key(row):
+    return row["case_id"], row["arm"], row.get("phase", "combined"), row["seed"]
 
 
 def validate_row(row, manifest, cases):
@@ -369,11 +404,16 @@ def validate_row(row, manifest, cases):
         raise ValueError("Observation must be a JSON object")
     case = cases.get(row.get("case_id"))
     arm = row.get("arm")
+    phase = row.get("phase", "combined")
+    split = manifest.get("format") == FORMAT
+    if (split and phase not in ("quality", "runtime")) or (not split and phase != "combined"):
+        raise ValueError("Incompatible observation phase")
+    seed_field = "runtime_seeds" if phase == "runtime" else "seeds"
     if (
         case is None
         or arm not in ARMS
         or type(row.get("seed")) is not int
-        or row.get("seed") not in case["seeds"][arm]
+        or row.get("seed") not in case[seed_field][arm]
         or row.get("session_id") != manifest["session_id"]
         or row.get("build_id") != manifest["sources"][arm]["build_id"]
         or row.get("configuration_digest") != case["configuration_digests"][arm]
@@ -382,7 +422,10 @@ def validate_row(row, manifest, cases):
     if row.get("status") not in ("ok", "failed"):
         raise ValueError("Unknown observation status")
     if row["status"] == "ok":
-        for metric in ("D2", "N2", "runtime_s"):
+        timed = phase != "quality"
+        if not timed and ("runtime_s" in row or "runtime_samples_s" in row):
+            raise ValueError("Quality observation must not contain runtime measurements")
+        for metric in (("D2", "N2", "runtime_s") if timed else ("D2", "N2")):
             value = row.get(metric)
             if (
                 not isinstance(value, (int, float))
@@ -394,7 +437,7 @@ def validate_row(row, manifest, cases):
             ):
                 raise ValueError(f"Invalid successful metric: {metric}")
         samples = row.get("runtime_samples_s", [])
-        if (
+        if timed and (
             not isinstance(samples, list)
             or len(samples) != manifest["settings"]["runtime_repeats"]
             or any(
@@ -410,7 +453,7 @@ def validate_row(row, manifest, cases):
         checks = row.get("checks")
         if not isinstance(checks, dict) or any(
             not isinstance(checks.get(name), dict) or checks[name].get("status") != "verified"
-            for name in ("C0", "C6", "timed_output")
+            for name in (("C0", "C6", "timed_output") if timed else ("C0", "C6"))
         ):
             raise ValueError("Successful observation lacks verified C0/C6/timed-output checks")
         if checks["C0"].get("errors") or any(
@@ -418,12 +461,14 @@ def validate_row(row, manifest, cases):
         ):
             raise ValueError("Successful metrics disagree with C0 validation")
         identity = {key: row.get(key) for key in ("output_sha256", "logical_layout_digest")}
-        identities = checks["timed_output"].get("identities")
+        identities = checks.get("timed_output", {}).get("identities")
         if (
             any(not isinstance(value, str) or not value for value in identity.values())
-            or not isinstance(identities, list)
-            or len(identities) != len(samples)
-            or any(item != identity for item in identities)
+            or (timed and (
+                not isinstance(identities, list)
+                or len(identities) != len(samples)
+                or any(item != identity for item in identities)
+            ))
         ):
             raise ValueError("Timed outputs disagree with the checked output")
 
@@ -434,7 +479,7 @@ def load_observations(output, manifest):
     for path in sorted((Path(output) / "raw").glob("*.json")):
         row = json.loads(path.read_text())
         validate_row(row, manifest, cases)
-        key = (row["case_id"], row["arm"], row["seed"])
+        key = observation_key(row)
         if key in seen:
             raise ValueError(f"Duplicate observation: {key}")
         seen.add(key)
@@ -443,7 +488,7 @@ def load_observations(output, manifest):
 
 
 class Worker:
-    """One Qiskit build per process; request/response keeps both builds strictly serial."""
+    """One Qiskit build per process, with blocking requests controlled by the collector."""
 
     def __init__(self, output, arm, case):
         self.output, self.arm, self.case = Path(output), arm, case
@@ -499,7 +544,7 @@ class Worker:
                 self.buffer += block
         line, self.buffer = self.buffer.split(b"\n", 1)
         result = json.loads(line)
-        if action != "sample" and result.get("status") != "ok":
+        if action not in ("sample", "quality_sample") and result.get("status") != "ok":
             raise RuntimeError(f"{self.arm} {action} failed: {result.get('error', result)}")
         return result
 
@@ -531,26 +576,144 @@ def collect(output, evolved, baseline, profile, **settings):
     with locked(root / ".collection.lock", wait=False), locked(runner_lock(), wait=False):
         manifest = freeze(root, evolved, baseline, profile, **settings)
         cases = {case["case_id"]: case for case in manifest["cases"]}
-        rows = load_observations(root, manifest)
-        existing = {(r["case_id"], r["arm"], r["seed"]): r for r in rows}
-        successful = sum(row["status"] == "ok" for row in rows)
-        expected = manifest["expected_observations"]
+        existing = {observation_key(row): row for row in load_observations(root, manifest)}
         started = time.monotonic()
         config = manifest["settings"]
-        status = {"status": "collecting", "expected": expected, "successful": successful}
+        phases = {
+            phase: {
+                "expected": manifest[f"expected_{phase}_observations"],
+                "successful": sum(
+                    row["status"] == "ok" and row["phase"] == phase for row in existing.values()
+                ),
+            }
+            for phase in ("quality", "runtime")
+        }
+        status = {
+            "status": "collecting",
+            "phase": "quality",
+            "expected": manifest["expected_observations"],
+            "successful": sum(value["successful"] for value in phases.values()),
+            "phases": phases,
+        }
         write_json(root / "collection_status.json", status)
+        progress_lock = threading.Lock()
+        stopped = threading.Event()
+
+        def pending_seeds(case, arm, phase):
+            field = "runtime_seeds" if phase == "runtime" else "seeds"
+            return [
+                seed for seed in case[field][arm]
+                if existing.get((case["case_id"], arm, phase, seed), {}).get("status") != "ok"
+            ]
+
+        def record(path, row):
+            # Subprocesses compile concurrently; only progress publication is serialized.
+            with progress_lock:
+                write_json(path, row)
+                existing[observation_key(row)] = row
+                phases[row["phase"]]["successful"] += row["status"] == "ok"
+                status.update(
+                    successful=sum(value["successful"] for value in phases.values()),
+                    elapsed_s=time.monotonic() - started,
+                )
+                write_json(root / "collection_status.json", status)
+                timing = f" runtime_s={row.get('runtime_s')}" if row["phase"] == "runtime" else ""
+                print(
+                    f"  {status['successful']}/{status['expected']} ok | {row['phase']} "
+                    f"{row['case_id']} {row['arm']} seed={row['seed']}: {row['status']} "
+                    f"D2={row.get('D2')} N2={row.get('N2')}" + timing,
+                    flush=True,
+                )
+
+        def preflight(worker, case, arm, phase):
+            result = worker.request("preflight", timeout=120)
+            name = f"{phase}__{digest(case['case_id'])[:16]}__{arm}.json"
+            write_json(root / "preflight" / name, result)
+
+        def sample(worker, case, arm, seed, phase):
+            path = row_path(root, case["case_id"], arm, seed, phase)
+            if path.exists():
+                archive = root / "attempts" / f"{path.stem}-{uuid.uuid4().hex}.json"
+                archive.parent.mkdir(exist_ok=True)
+                path.replace(archive)
+            try:
+                compilations = config["runtime_repeats"] + 1 if phase == "runtime" else 1
+                row = worker.request(
+                    "sample" if phase == "runtime" else "quality_sample",
+                    seed=seed,
+                    timeout=120 + compilations * case["timeout_s"],
+                )
+                validate_row(row, manifest, cases)
+                if observation_key(row) != (case["case_id"], arm, phase, seed):
+                    raise ValueError("Worker returned a different case, build, or seed/phase")
+            except (RuntimeError, TimeoutError, ValueError) as exc:
+                record(path, {
+                    "case_id": case["case_id"],
+                    "arm": arm,
+                    "phase": phase,
+                    "seed": seed,
+                    "session_id": manifest["session_id"],
+                    "build_id": manifest["sources"][arm]["build_id"],
+                    "configuration_digest": case["configuration_digests"][arm],
+                    "status": "failed",
+                    "error": str(exc),
+                })
+                raise
+            record(path, row)
+
+        def quality_job(case, arm, seeds):
+            if stopped.is_set():
+                return
+            worker = Worker(root, arm, case)
+            try:
+                preflight(worker, case, arm, "quality")
+                for seed in seeds:
+                    if stopped.is_set():
+                        break
+                    sample(worker, case, arm, seed, "quality")
+            except BaseException:
+                stopped.set()
+                raise
+            finally:
+                worker.close()
+
         try:
+            print(f"Quality phase: {config['workers']} workers", flush=True)
+            # Threads supervise isolated Qiskit subprocesses; no Qiskit is imported here.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=config["workers"]) as pool:
+                futures = [
+                    pool.submit(quality_job, case, arm, seeds)
+                    for case in manifest["cases"]
+                    for arm in ARMS
+                    if (seeds := pending_seeds(case, arm, "quality"))
+                ]
+                try:
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()
+                except BaseException:
+                    stopped.set()
+                    for future in futures:
+                        future.cancel()
+                    raise
+            # The pool has joined and every quality subprocess has closed before timing.
+            if phases["quality"]["successful"] != phases["quality"]["expected"]:
+                status.update(
+                    status="incomplete", error="Quality phase incomplete; runtime deferred"
+                )
+                write_json(root / "collection_status.json", status)
+                return status
+            status["phase"] = "runtime"
+            write_json(root / "collection_status.json", status)
+            print("Runtime phase: serial collection after quality workers finished", flush=True)
             for case_index, case in enumerate(manifest["cases"]):
                 pending = {
                     (arm, seed)
                     for arm in ARMS
-                    for seed in case["seeds"][arm]
-                    if existing.get((case["case_id"], arm, seed), {}).get("status") != "ok"
+                    for seed in pending_seeds(case, arm, "runtime")
                 }
                 if not pending:
                     continue
                 timeout = case["timeout_s"]
-                print(f"Case {case_index + 1}/{len(cases)}: {case['case_id']}", flush=True)
                 with ExitStack() as stack:
                     workers = {}
                     for arm in sample_order(case_index, 0):
@@ -558,65 +721,20 @@ def collect(output, evolved, baseline, profile, **settings):
                             continue
                         workers[arm] = worker = Worker(root, arm, case)
                         stack.callback(worker.close)
-                        preflight = worker.request("preflight", timeout=120)
-                        write_json(root / "preflight" / f"{arm}.json", preflight)
+                        preflight(worker, case, arm, "runtime")
                     for worker in workers.values():
                         worker.request("warmup", timeout=120 + config["warmups"] * timeout)
-                    for index in range(config["seed_count"]):
+                    for index in range(config["runtime_seed_count"]):
                         for arm in sample_order(case_index, index):
-                            seed = case["seeds"][arm][index]
-                            if (arm, seed) not in pending:
-                                continue
-                            path = row_path(root, case["case_id"], arm, seed)
-                            if path.exists():
-                                archive = root / "attempts" / f"{path.stem}-{uuid.uuid4().hex}.json"
-                                archive.parent.mkdir(exist_ok=True)
-                                path.replace(archive)
-                            try:
-                                row = workers[arm].request(
-                                    "sample",
-                                    seed=seed,
-                                    timeout=120 + (config["runtime_repeats"] + 1) * timeout,
-                                )
-                                validate_row(row, manifest, cases)
-                                if (row["case_id"], row["arm"], row["seed"]) != (
-                                    case["case_id"],
-                                    arm,
-                                    seed,
-                                ):
-                                    raise ValueError(
-                                        "Worker returned a different case, build, or seed"
-                                    )
-                            except (RuntimeError, TimeoutError, ValueError) as exc:
-                                row = {
-                                    "case_id": case["case_id"],
-                                    "arm": arm,
-                                    "seed": seed,
-                                    "session_id": manifest["session_id"],
-                                    "build_id": manifest["sources"][arm]["build_id"],
-                                    "configuration_digest": case["configuration_digests"][arm],
-                                    "status": "failed",
-                                    "error": str(exc),
-                                }
-                                write_json(path, row)
-                                raise
-                            write_json(path, row)
-                            successful += row["status"] == "ok"
-                            status.update(
-                                successful=successful, elapsed_s=time.monotonic() - started
-                            )
-                            write_json(root / "collection_status.json", status)
-                            print(
-                                f"  {successful}/{expected} ok | {arm} seed {index + 1}/"
-                                f"{config['seed_count']}: {row['status']} "
-                                f"D2={row.get('D2')} N2={row.get('N2')} "
-                                f"runtime_s={row.get('runtime_s')}",
-                                flush=True,
-                            )
+                            seed = case["runtime_seeds"][arm][index]
+                            if (arm, seed) in pending:
+                                sample(workers[arm], case, arm, seed, "runtime")
         except BaseException as exc:
             status.update(status="incomplete", error=f"{type(exc).__name__}: {exc}")
             write_json(root / "collection_status.json", status)
             raise
-        status.update(status="complete" if successful == expected else "incomplete")
+        status.update(
+            status="complete" if status["successful"] == status["expected"] else "incomplete"
+        )
         write_json(root / "collection_status.json", status)
         return status
