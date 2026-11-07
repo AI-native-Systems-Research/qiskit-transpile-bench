@@ -73,6 +73,13 @@ SABRE layout search and routing. Use a fresh output directory (for example
 `--mode fixed_layout` retains that conditional routing experiment. The command's default
 output is `./compare_distributions_results`, and it does not issue a two-build verdict.
 
+For a broad, quality-only baseline/evolved comparison, use
+[`compare_to_baseline_benchpress`](compare_to_baseline_benchpress/README.md).
+It selects 400 Benchpress circuit/target combinations at L2/L3 with one seed per
+build (1,600 compilations), targeting roughly 90 minutes with six workers. Evolved uses
+wait-time weight `0.0025` in both SABRE layout and routing; no runtime comparison
+or acceptance check is performed.
+
 ## Development
 
 ```bash
