@@ -40,8 +40,8 @@ from qtb.coordinator.storage import locked
 FORMAT = "qtb-compare-to-baseline-benchpress/1"
 LEVELS = (2, 3)
 DEFAULT_PANEL_SIZE = 400
-DEFAULT_WORKERS = 6
-DEFAULT_SEEDS = 1
+DEFAULT_WORKERS = 8
+DEFAULT_SEEDS = 3
 DEFAULT_TRIALS = 20
 
 
@@ -124,7 +124,7 @@ def run_worker(command, log, timeout, *, cancel_event=None):
 
 def validate_session(output, manifest, *, verify_build=True):
     root = Path(output)
-    if manifest.get("format") != FORMAT:
+    if manifest.get("format") not in (FORMAT, "qtb-compare-to-baseline-benchpress/2"):
         raise ValueError("Unsupported Benchpress comparison manifest")
     if digest({k: v for k, v in manifest.items() if k != "session_id"}) != manifest["session_id"]:
         raise ValueError("Frozen manifest identity changed")
@@ -158,11 +158,24 @@ def freeze(
     seed_count=DEFAULT_SEEDS,
     workers=DEFAULT_WORKERS,
     trials=DEFAULT_TRIALS,
-    master_seed=20261107,
+    master_seed=20261108,
     panel_size=DEFAULT_PANEL_SIZE,
     case_ids=(),
     timeout_s=600,
+    design="balanced",
+    include_supplemental=True,
 ):
+    if design == "balanced":
+        from .balanced_collect import freeze_balanced
+
+        return freeze_balanced(
+            output, evolved, baseline, benchpress_source=benchpress_source,
+            seed_count=seed_count, workers=workers, trials=trials, master_seed=master_seed,
+            panel_size=panel_size, case_ids=case_ids, timeout_s=timeout_s,
+            include_supplemental=include_supplemental,
+        )
+    if design != "legacy":
+        raise ValueError("Unknown benchmark design")
     from .panel import estimate_budget, select_panel
 
     root = Path(output).resolve()
@@ -417,6 +430,13 @@ def validate_row(row, manifest, cases):
             or not row["input_identity"]
         ):
             raise ValueError("Successful observation lacks matching inputs/target/single call")
+        if case.get("execution_kind") == "balanced":
+            if row.get("input_identity") != case["input_identity"]:
+                raise ValueError("Frozen logical input identity mismatch")
+            if any(row.get("checks", {}).get(key, {}).get("status") != "verified"
+                   for key in ("C0", "C6", "input", "single_call", "target")):
+                raise ValueError("Balanced observation lacks C0/C6/input/target validation")
+            return
         phases = row.get("checks", {}).get("benchpress", {}).get("phases", {})
         if set(phases) != {"setup", "call", "teardown"} or any(
             phase.get("status") != "passed" for phase in phases.values()
@@ -540,7 +560,8 @@ def collect(output, evolved, baseline, **settings):
             else:
                 pool = concurrent.futures.ThreadPoolExecutor(manifest["settings"]["workers"])
                 try:
-                    record(pool.map(sample, tasks))
+                    futures = [pool.submit(sample, task) for task in tasks]
+                    record(future.result() for future in concurrent.futures.as_completed(futures))
                 finally:
                     cancellation.set()
                     pool.shutdown(wait=True, cancel_futures=True)

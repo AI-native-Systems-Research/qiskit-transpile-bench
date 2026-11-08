@@ -124,6 +124,59 @@ def bootstrap(root, arm, manifest, level=2, seed=0):
     return capabilities
 
 
+def bootstrap_balanced(root, arm, manifest):
+    """Select a frozen build without importing or configuring upstream Benchpress."""
+    os.environ.update(THREAD_ENV)
+    os.environ.update(PYTHONHASHSEED="0", QISKIT_IGNORE_USER_SETTINGS="TRUE")
+    build = SimpleNamespace(output=root, arm=arm, manifest=manifest, capabilities=None)
+    return BuildWorker.preflight(build)
+
+
+def balanced_sample(root, manifest, arm, case, seed):
+    """Compile one frozen generated input, with C0 and C6 routing checks."""
+    from compare_to_baseline.worker import checked_compile
+
+    from .balanced_io import load_context
+
+    row = {
+        "case_id": case["case_id"],
+        "node_id": case.get("node_id", case["input_id"]),
+        "arm": arm,
+        "seed": seed,
+        "phase": "quality",
+        "session_id": manifest["session_id"],
+        "build_id": manifest["sources"][arm]["build_id"],
+        "configuration_digest": case["configuration_digests"][arm],
+        "status": "failed",
+    }
+    try:
+        if type(seed) is not int or seed not in case["seeds"][arm]:
+            raise ValueError("Seed does not belong to the frozen case/build")
+        context = load_context(root, case)
+        result = checked_compile(
+            case, context, arm, seed, manifest["settings"]["trials"], diagnostics=True
+        )
+        row.update(result)
+        row.update(
+            call_count=1,
+            input_hash=case["input_hash"],
+            input_identity=context["input_identity"],
+            target_hash=case["target_hash"],
+            input_num_qubits=context["circuit"].num_qubits,
+            native_2q_gate=case["native_2q_names"][0],
+        )
+        row["checks"].update(
+            single_call={"status": "verified"},
+            target={"status": result["checks"]["C0"]["status"]},
+            input={"status": "verified"},
+        )
+        if row["status"] != "ok":
+            row["error"] = "C0 target compliance or C6 routing replay did not verify"
+    except Exception as exc:
+        row.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    return row
+
+
 def pytest_arguments(root, selection, *, collect=False):
     source = root / "sources/benchpress"
     arguments = [
@@ -272,11 +325,15 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--arm", choices=("baseline", "evolved"), required=True)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("inventory", "targets", "sample", "preflight"):
+    for name in (
+        "inventory", "targets", "sample", "preflight", "balanced-prepare", "balanced-check"
+    ):
         command = commands.add_parser(name)
         command.add_argument("--destination", type=Path, required=True)
         if name == "targets":
             command.add_argument("--panel", type=Path, required=True)
+        elif name == "balanced-check":
+            command.add_argument("--inventory", type=Path, required=True)
         elif name == "sample":
             command.add_argument("--case-id", required=True)
             command.add_argument("--seed", type=int, required=True)
@@ -288,17 +345,33 @@ def main(argv=None):
         case = None
         if args.command == "sample":
             case = next(row for row in manifest["cases"] if row["case_id"] == args.case_id)
-        capabilities = bootstrap(
-            root, args.arm, manifest,
-            level=case["optimization_level"] if case else 2,
-            seed=args.seed if case else 0,
+        balanced = args.command.startswith("balanced-") or (
+            case is not None and case.get("execution_kind") == "balanced"
         )
-        if args.command == "inventory":
+        if balanced:
+            capabilities = bootstrap_balanced(root, args.arm, manifest)
+        else:
+            capabilities = bootstrap(
+                root, args.arm, manifest,
+                level=case["optimization_level"] if case else 2,
+                seed=args.seed if case else 0,
+            )
+        if args.command == "balanced-prepare":
+            from .balanced_io import prepare
+
+            result = prepare(root)
+        elif args.command == "balanced-check":
+            from .balanced_io import check
+
+            result = check(root, json.loads(args.inventory.read_text()))
+        elif args.command == "inventory":
             result = collect_inventory(root)
         elif args.command == "targets":
             result = fingerprint_targets(json.loads(args.panel.read_text()))
         elif args.command == "preflight":
             result = capabilities
+        elif balanced:
+            result = balanced_sample(root, manifest, args.arm, case, args.seed)
         else:
             result = sample(root, manifest, args.arm, case, args.seed)
         write_json(args.destination, result)

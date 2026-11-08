@@ -1,4 +1,4 @@
-"""Compare baseline and evolved circuit quality on a broad, pinned Benchpress panel."""
+"""Compare frozen Qiskit builds on balanced panels and pinned Benchpress coverage."""
 
 import argparse
 import importlib.metadata
@@ -22,7 +22,7 @@ from .collect import (
     validate_session,
 )
 
-DEFAULT_OUTPUT = ROOT / "output/compare_to_baseline_benchpress"
+DEFAULT_OUTPUT = ROOT / "output/compare_to_baseline_benchpress_balanced"
 
 
 def main(argv=None):
@@ -41,6 +41,18 @@ def main(argv=None):
         command.add_argument("--baseline", type=Path, default=ROOT.parent / "qiskit-evolved-main")
         command.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
         command.add_argument(
+            "--design",
+            choices=("balanced", "legacy"),
+            default="balanced",
+            help="Balanced crossed panels (default) or legacy corpus selection",
+        )
+        command.add_argument(
+            "--core-only",
+            action="store_false",
+            dest="include_supplemental",
+            help="Collect only the two core panels; omit coverage appendices",
+        )
+        command.add_argument(
             "--benchpress-source",
             type=Path,
             help="Local Git mirror containing the pinned commit (otherwise fetch)",
@@ -49,13 +61,13 @@ def main(argv=None):
             "--seeds",
             type=int,
             default=DEFAULT_SEEDS,
-            help="Paired seeds per case/build; default 1 favors coverage",
+            help="Matched seeds per case/build; default 3",
         )
         command.add_argument(
             "--workers",
             type=int,
             default=DEFAULT_WORKERS,
-            help="Concurrent quality processes; the ~90 minute estimate assumes 6",
+            help="Concurrent quality processes; default 8, one native thread each",
         )
         command.add_argument(
             "--trials",
@@ -63,12 +75,12 @@ def main(argv=None):
             default=DEFAULT_TRIALS,
             help="Equal layout, layout-swap and routing trials",
         )
-        command.add_argument("--master-seed", type=int, default=20261107)
+        command.add_argument("--master-seed", type=int, default=20261108)
         command.add_argument(
             "--panel-size",
             type=int,
             default=DEFAULT_PANEL_SIZE,
-            help="Maximum circuit/target combinations before expanding L2/L3",
+            help="Legacy mode only: maximum circuit/target combinations before L2/L3",
         )
         command.add_argument(
             "--case",
